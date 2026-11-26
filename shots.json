@@ -1,0 +1,18 @@
+[
+  {
+    "name": "1-start.jpg",
+    "query": "?shot=start&seed=1"
+  },
+  {
+    "name": "2-rings.jpg",
+    "query": "?shot=rings&seed=1"
+  },
+  {
+    "name": "3-landing.jpg",
+    "query": "?shot=landing&seed=1"
+  },
+  {
+    "name": "4-complete.jpg",
+    "query": "?shot=complete&seed=1"
+  }
+]
