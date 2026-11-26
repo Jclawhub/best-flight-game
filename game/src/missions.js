@@ -1,250 +1,259 @@
-// The three missions of Senja Amphibi — objectives, scoring and the clock.
-// One mission runs at a time; each is 180 seconds, and finishing one pays a
-// time bonus. Combos grow when clean passes follow each other quickly.
+// Senja Amphibi — the four missions: Ring Run, Island Hop, Mail Drop and
+// the new Rescue Run. One 180-second sortie each, scored, with a live
+// objective, falling crates, spray and ring-burst particles.
 
-export const MISSION_TIME = 180;
+import { RING_COURSE } from './world.js';
 
-export const MISSIONS = [
+export const MISSION_DEFS = [
   {
-    id: 'rings',
-    name: 'Ring Run',
-    short: 'RING RUN',
-    desc: 'Fly through 6 glowing rings over the islands, against the clock.',
-    tip: 'Hold the mouse to climb. Rings pay +100, combos pay more.',
+    id: 'rings', key: '1', name: 'Ring Run',
+    goal: 'Fly through all 6 glowing rings in order',
+    reward: '6 rings x 100 pts',
   },
   {
-    id: 'hop',
-    name: 'Island Hop',
-    short: 'ISLAND HOP',
-    desc: 'Land the seaplane on the water at 3 lagoon docks, then take off again.',
-    tip: 'Cut the throttle and glide in slow. A clean landing pays +150.',
+    id: 'hop', key: '2', name: 'Island Hop',
+    goal: 'Water-land at 3 lagoon docks, gentle and slow',
+    reward: '3 docks x 150 pts',
   },
   {
-    id: 'mail',
-    name: 'Mail Drop',
-    short: 'MAIL DROP',
-    desc: 'Drop supply crates on 3 village docks — press Space right over the marker.',
-    tip: 'Fly low and slow over the red flag, then press Space.',
+    id: 'mail', key: '3', name: 'Mail Drop',
+    goal: 'Drop a crate on each village dock (Space)',
+    reward: '3 villages x 120 pts',
+  },
+  {
+    id: 'rescue', key: '4', name: 'Rescue Run',
+    goal: 'Land by the raft, pick up the sailor, deliver them home',
+    reward: 'Pickup 100 + delivery 200 pts',
   },
 ];
 
-export class MissionManager {
+export function missionDef(id) {
+  return MISSION_DEFS.find((m) => m.id === id) || MISSION_DEFS[0];
+}
+
+function dist2D(ax, az, bx, bz) {
+  return Math.hypot(ax - bx, az - bz);
+}
+
+export class MissionSet {
   constructor(world) {
     this.world = world;
     this.reset();
   }
 
   reset() {
-    this.mission = null;
+    this.current = null;
     this.score = 0;
-    this.combo = 0;
-    this.comboTimer = 0;
-    this.timeLeft = MISSION_TIME;
+    this.timeLeft = 180;
     this.complete = false;
     this.failed = false;
     this.failReason = '';
-    this.message = '';
-    this.messageTimer = 0;
-    this.crates = [];
     this.ringIndex = 0;
     this.dockIndex = 0;
     this.dropIndex = 0;
-    for (const ring of this.world.rings) ring.passed = false;
-    for (const dock of this.world.docks) dock.done = false;
+    this.rescueStage = 'pickup'; // 'pickup' -> 'deliver' -> 'done'
+    this.dropsLeft = 9;
+    this.crates = [];
+    this.particles = [];
+    this.toast = '';
+    this.toastLeft = 0;
+    this.landedAt = null;
   }
 
-  start(missionId) {
+  start(id) {
     this.reset();
-    this.mission = MISSIONS.find((m) => m.id === missionId) ?? MISSIONS[0];
-    this.message = `${this.mission.short} — ${this.mission.tip}`;
-    this.messageTimer = 5;
+    this.current = id;
   }
 
-  get active() {
-    return this.mission !== null && !this.complete && !this.failed;
-  }
-
-  // The next thing to fly to, for the HUD arrow and the beacon.
   getObjective() {
-    if (!this.mission) return null;
-    if (this.mission.id === 'rings') {
-      const ring = this.world.rings[this.ringIndex];
-      if (!ring) return null;
-      return { x: ring.x, y: ring.y, z: ring.z, label: `RING ${this.ringIndex + 1}/6`, kind: 'ring' };
+    if (!this.current || this.complete || this.failed) return null;
+    if (this.current === 'rings') {
+      if (this.ringIndex >= RING_COURSE.length) return null;
+      const r = RING_COURSE[this.ringIndex];
+      return { x: r.x, y: r.y, z: r.z, label: `Ring ${this.ringIndex + 1} of 6`, kind: 'ring' };
     }
-    if (this.mission.id === 'hop') {
-      const docks = this.world.docks.filter((d) => d.kind === 'lagoon');
-      const dock = docks[this.dockIndex];
-      if (!dock) return null;
-      return { x: dock.x, y: 0, z: dock.z, label: `LAGOON ${this.dockIndex + 1}/3`, kind: 'dock' };
+    if (this.current === 'hop') {
+      if (this.dockIndex >= this.world.hopDocks.length) return null;
+      const d = this.world.hopDocks[this.dockIndex];
+      return { x: d.x, y: 0, z: d.z, label: `Lagoon Dock ${this.dockIndex + 1} of 3 — land on the water`, kind: 'dock' };
     }
-    const villages = this.world.docks.filter((d) => d.kind === 'village');
-    const dock = villages[this.dropIndex];
-    if (!dock) return null;
-    return { x: dock.x, y: 0, z: dock.z, label: `VILLAGE ${this.dropIndex + 1}/3`, kind: 'dock' };
-  }
-
-  get nextRing() {
-    if (this.mission?.id !== 'rings') return null;
-    return this.world.rings[this.ringIndex] ?? null;
-  }
-
-  get nextDock() {
-    if (!this.mission) return null;
-    if (this.mission.id === 'hop') {
-      return this.world.docks.filter((d) => d.kind === 'lagoon')[this.dockIndex] ?? null;
+    if (this.current === 'mail') {
+      if (this.dropIndex >= this.world.mailVillages.length) return null;
+      const v = this.world.mailVillages[this.dropIndex];
+      return { x: v.x, y: 0, z: v.z, label: `Village ${this.dropIndex + 1} of 3 — drop a crate (Space)`, kind: 'village' };
     }
-    if (this.mission.id === 'mail') {
-      return this.world.docks.filter((d) => d.kind === 'village')[this.dropIndex] ?? null;
+    if (this.current === 'rescue') {
+      if (this.rescueStage === 'pickup') {
+        const r = this.world.raft;
+        return { x: r.x, y: 0, z: r.z, label: 'Raft — land to pick up the sailor', kind: 'raft' };
+      }
+      if (this.rescueStage === 'deliver') {
+        const d = this.world.mainDock;
+        return { x: d.x, y: 0, z: d.z, label: 'Main Dock — deliver the sailor', kind: 'dock' };
+      }
     }
     return null;
   }
 
-  addScore(base, reason) {
-    if (this.comboTimer > 0) this.combo += 1;
-    else this.combo = 1;
-    this.comboTimer = 20;
-    const points = Math.round(base * (1 + 0.1 * (this.combo - 1)));
-    this.score += points;
-    this.message = `${reason}  +${points}${this.combo > 1 ? `  (COMBO x${this.combo})` : ''}`;
-    this.messageTimer = 2.5;
-    return points;
+  showToast(text, seconds = 2.6) {
+    this.toast = text;
+    this.toastLeft = seconds;
   }
 
-  // Plane events arrive here from the game loop.
-  onPlaneEvent(type, detail, plane) {
-    if (!this.active) return;
-    if (type === 'landed' && this.mission.id === 'hop') {
-      const dock = this.nextDock;
-      if (dock) {
-        const dx = plane.x - dock.x;
-        const dz = plane.z - dock.z;
-        if (dx * dx + dz * dz < 55 * 55) {
-          dock.done = true;
-          this.addScore(150, `DOCKED AT ${dock.label}`);
-          this.dockIndex += 1;
-          if (this.dockIndex >= 3) this._finish();
-        } else {
-          this.message = 'Safe landing — but not on a lagoon dock.';
-          this.messageTimer = 2.5;
-        }
-      }
-    }
-    if (type === 'rough') {
-      this.score = Math.max(0, this.score - 10);
-      this.message = `Rough landing!  −20  (damage ${Math.round(plane.damage)}%)`;
-      this.messageTimer = 2.5;
-      if (plane.damage >= 100) this._fail('The seaplane broke apart on impact.');
-    }
-    if (type === 'crash') {
-      const what = detail.what === 'island' ? 'an island' : detail.what === 'volcano' ? 'the volcano' : 'the water';
-      this._fail(`Crashed into ${what}.`);
+  burst(x, y, z, color, count = 22) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 12 + Math.random() * 38;
+      this.particles.push({
+        x, y, z, vx: Math.cos(a) * sp, vy: (Math.random() - 0.3) * 30,
+        vz: Math.sin(a) * sp, life: 0, maxLife: 0.7 + Math.random() * 0.6,
+        color, size: 2 + Math.random() * 4,
+      });
     }
   }
 
-  // Space was pressed: only Mail Drop uses it.
-  onDropPressed(plane) {
-    if (!this.active || this.mission.id !== 'mail') return;
-    const dock = this.nextDock;
-    if (!dock) return;
-    const dx = plane.x - dock.x;
-    const dz = plane.z - dock.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist < 70 && plane.alt > 15 && plane.alt < 260) {
-      this.crates.push({ x: plane.x, z: plane.z, y: plane.alt, vy: 0, dock, state: 'falling' });
-      this.message = 'Crate away!';
-      this.messageTimer = 1.5;
-    } else if (dist < 120) {
-      this.message = 'Too high or off the marker — get lower and closer.';
-      this.messageTimer = 2;
+  spray(x, z, count = 18) {
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 8 + Math.random() * 30;
+      this.particles.push({
+        x, y: 1, z, vx: Math.cos(a) * sp, vy: 4 + Math.random() * 14,
+        vz: Math.sin(a) * sp, life: 0, maxLife: 0.5 + Math.random() * 0.5,
+        color: '#eaf6ff', size: 2 + Math.random() * 3,
+      });
     }
   }
 
-  update(dt, plane) {
-    if (this.messageTimer > 0) this.messageTimer -= dt;
-    if (this.comboTimer > 0) this.comboTimer -= dt;
-    if (!this.active) {
-      this._updateCrates(dt);
-      return;
-    }
-    this.timeLeft -= dt;
-    if (this.timeLeft <= 0) {
-      this.timeLeft = 0;
-      this._fail("Time's up — the sortie window closed.");
-      return;
-    }
-    if (this.mission.id === 'rings') {
-      const ring = this.nextRing;
-      if (ring) {
-        const dx = plane.x - ring.x;
-        const dy = plane.alt - ring.y;
-        const dz = plane.z - ring.z;
-        const dist = Math.hypot(dx, dy, dz);
-        if (dist < 34 && !ring.passed) {
-          ring.passed = true;
-          this.addScore(100, `RING ${ring.index + 1}/6`);
-          this.ringIndex += 1;
-          if (this.ringIndex >= this.world.rings.length) this._finish();
-        }
-      }
-    }
-    if (plane.fuel <= 0 && !plane.landed && plane.alt > 2) {
-      this.message = 'OUT OF FUEL — glide her down gently!';
-      this.messageTimer = 1;
-    }
-    this._updateCrates(dt);
+  dropCrate(plane, audio) {
+    if (this.current !== 'mail' || this.complete || this.failed) return;
+    if (this.dropsLeft <= 0) { this.showToast('Out of crates!'); return; }
+    this.dropsLeft -= 1;
+    const v = plane.speed / 3.6;
+    this.crates.push({
+      x: plane.x, z: plane.z, y: plane.alt,
+      vx: Math.sin(plane.heading) * v * 0.2,
+      vz: Math.cos(plane.heading) * v * 0.2,
+      vy: -30,
+    });
+    if (audio) audio.click();
   }
 
-  _updateCrates(dt) {
-    for (const crate of this.crates) {
-      if (crate.state === 'falling') {
-        crate.vy = Math.min(14, crate.vy + dt * 20);
-        crate.y -= crate.vy * dt;
-        if (crate.y <= 0) {
-          crate.y = 0;
-          crate.state = 'landed';
-          crate.landedTimer = 8; // the crate stays visible a while, then fades
-          const dx = crate.x - crate.dock.x;
-          const dz = crate.z - crate.dock.z;
-          if (dx * dx + dz * dz < 40 * 40 && this.mission?.id === 'mail' && this.active) {
-            crate.dock.done = true;
-            this.addScore(120, `SUPPLIES TO ${crate.dock.label}`);
-            this.dropIndex += 1;
-            if (this.dropIndex >= 3) this._finish();
-          } else if (this.active) {
-            this.message = 'The crate missed the dock.';
-            this.messageTimer = 2;
-          }
-        }
-      } else if (crate.state === 'landed') {
-        crate.landedTimer -= dt;
-      }
-    }
-    this.crates = this.crates.filter((c) => c.state === 'falling' || c.landedTimer > 0);
-  }
-
-  // One-line summary for the mission-complete screen.
-  summary() {
-    if (!this.mission) return '';
-    const done =
-      this.mission.id === 'rings'
-        ? `${this.ringIndex}/6 rings`
-        : this.mission.id === 'hop'
-          ? `${this.dockIndex}/3 docks`
-          : `${this.dropIndex}/3 drops`;
-    return `${this.mission.name} — ${done} — ${Math.round(this.timeLeft)}s left`;
-  }
-
-  _finish() {
-    const bonus = Math.round(this.timeLeft) * 5;
-    this.score += bonus;
+  finish() {
+    this.score += 50;
     this.complete = true;
-    this.message = `MISSION COMPLETE — time bonus +${bonus}`;
-    this.messageTimer = 6;
+    this.showToast('Mission complete! +50 bonus', 4);
   }
 
-  _fail(reason) {
+  fail(reason) {
+    if (this.complete || this.failed) return;
     this.failed = true;
     this.failReason = reason;
+  }
+
+  // Called by the game loop when the plane reports an event.
+  onPlaneEvent(ev, plane, audio) {
+    if (!this.current || this.complete || this.failed) return;
+    if (ev === 'takeoff') {
+      this.spray(plane.x, plane.z, 14);
+      if (audio) audio.splash();
+      return;
+    }
+    if (ev === 'crashed-sea') { this.fail('Crashed into the sea'); return; }
+    if (ev === 'crashed-island') { this.fail('Hit an island'); return; }
+    if (ev === 'fuel-out') { this.fail('Out of fuel'); return; }
+    if (ev === 'landed-clean' || ev === 'landed-rough') {
+      this.spray(plane.x, plane.z, ev === 'landed-clean' ? 20 : 12);
+      if (audio) { if (ev === 'landed-clean') audio.thud(); else audio.splash(); }
+      const o = this.getObjective();
+      if (!o || (o.kind !== 'dock' && o.kind !== 'raft')) return;
+      if (dist2D(plane.x, plane.z, o.x, o.z) > 55) {
+        this.showToast('Landed — but not at the objective. Take off and try again!');
+        return;
+      }
+      if (this.current === 'hop') {
+        if (ev === 'landed-clean') {
+          this.score += 150;
+          this.showToast(`Clean landing! +150  (Dock ${this.dockIndex + 1} of 3)`);
+        } else {
+          this.score = Math.max(0, this.score - 10);
+          this.showToast('Rough landing! +30 damage, -10 pts');
+        }
+        if (audio) audio.chime();
+        this.dockIndex += 1;
+        if (this.dockIndex >= this.world.hopDocks.length) this.finish();
+      } else if (this.current === 'rescue') {
+        if (this.rescueStage === 'pickup') {
+          this.score += 100;
+          this.rescueStage = 'deliver';
+          this.showToast('Sailor aboard! +100 — now fly them to the Main Dock');
+          if (audio) audio.chime();
+          this.burst(plane.x, 2, plane.z, '#ffd166', 16);
+        } else {
+          this.score += 200;
+          this.rescueStage = 'done';
+          this.showToast('Sailor delivered safe! +200');
+          if (audio) audio.fanfare();
+          this.finish();
+        }
+      }
+    }
+  }
+
+  update(dt, plane, audio) {
+    if (!this.current || this.complete || this.failed) return;
+    this.timeLeft -= dt;
+    if (this.toastLeft > 0) this.toastLeft -= dt;
+    if (this.timeLeft <= 0) {
+      this.timeLeft = 0;
+      this.fail('Time up — the sortie ended');
+      return;
+    }
+    // Ring fly-throughs.
+    if (this.current === 'rings' && this.ringIndex < RING_COURSE.length) {
+      const r = RING_COURSE[this.ringIndex];
+      const d = Math.sqrt(
+        (plane.x - r.x) ** 2 + (plane.z - r.z) ** 2 + (plane.alt - r.y) ** 2,
+      );
+      if (d < 34) {
+        this.score += 100;
+        this.ringIndex += 1;
+        this.burst(r.x, r.y, r.z, '#ffd166', 26);
+        this.showToast(`Ring ${this.ringIndex} of 6! +100`);
+        if (audio) { audio.chime(); audio.swoosh(); }
+        if (this.ringIndex >= RING_COURSE.length) this.finish();
+      }
+    }
+    // Falling crates.
+    for (let i = this.crates.length - 1; i >= 0; i--) {
+      const c = this.crates[i];
+      c.y += c.vy * dt;
+      c.x += c.vx * dt;
+      c.z += c.vz * dt;
+      c.vx *= Math.max(0, 1 - 1.5 * dt);
+      c.vz *= Math.max(0, 1 - 1.5 * dt);
+      if (c.y <= 0) {
+        const v = this.world.mailVillages[this.dropIndex];
+        if (v && dist2D(c.x, c.z, v.x, v.z) < 70) {
+          this.score += 120;
+          this.dropIndex += 1;
+          this.burst(v.x, 2, v.z, '#ffd166', 20);
+          this.showToast(`Crate delivered! +120  (Village ${this.dropIndex} of 3)`);
+          if (audio) audio.chime();
+          if (this.dropIndex >= this.world.mailVillages.length) this.finish();
+        } else {
+          this.spray(c.x, c.z, 8);
+          this.showToast('Crate missed the dock — line up and drop again');
+        }
+        this.crates.splice(i, 1);
+      }
+    }
+    // Particles age out.
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.life += dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+      p.vy -= 12 * dt;
+      if (p.life >= p.maxLife || p.y < 0) this.particles.splice(i, 1);
+    }
   }
 }

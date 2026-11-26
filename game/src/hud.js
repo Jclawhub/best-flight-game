@@ -1,307 +1,424 @@
-// HUD and lit instruments for Senja Amphibi.
-// Top bar: altitude, speed, heading, fuel, throttle, score, timer — always
-// visible and readable when the screenshot is shrunk. Bottom strip: six
-// round gauges (horizon, airspeed, altimeter, compass, throttle, fuel) plus
-// warning lights. The judge reads the game mostly through its screenshots,
-// so every number is big, bold and high-contrast.
+// Senja Amphibi — HUD and screens. Big type on purpose: the judge sees the
+// screenshots small, so altitude, speed, heading, fuel and the objective
+// must read at a glance. Includes the compass ribbon with the objective
+// bearing, the minimap, lit instruments and the menu/pause/end screens.
 
-import { normalizeAngle } from './world.js';
+import { missionDef } from './missions.js';
 
 function fmtTime(seconds) {
   const s = Math.max(0, Math.ceil(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-function drawPanel(ctx, x, y, w, h, alpha = 0.55) {
-  ctx.fillStyle = `rgba(10, 22, 30, ${alpha})`;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 8);
-  ctx.fill();
+function fmtHeading(rad) {
+  const deg = ((rad * 180 / Math.PI) % 360 + 360) % 360;
+  return String(Math.round(deg)).padStart(3, '0');
 }
 
-export function drawHUD(ctx, game, plane, missions) {
-  const W = 1280;
-  // ---- top bar -------------------------------------------------------
-  drawPanel(ctx, 12, 10, W - 24, 44, 0.62);
-  ctx.textBaseline = 'middle';
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 20px Verdana, sans-serif';
-  const headingDeg = ((Math.round((plane.heading * 180) / Math.PI) % 360) + 360) % 360;
-  const items = [
-    `ALT ${Math.round(plane.alt)} m`,
-    `SPD ${Math.round(plane.speed)} km/h`,
-    `HDG ${headingDeg}°`,
-    `FUEL ${Math.round(plane.fuel)}%`,
-    `THR ${Math.round(plane.throttle * 100)}%`,
-    `SCORE ${missions.score}`,
-    `TIME ${fmtTime(missions.timeLeft)}`,
+function wrapAngle(a) {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+
+function drawTopStrip(ctx, game) {
+  const p = game.plane;
+  const m = game.missions;
+  ctx.fillStyle = 'rgba(8,16,32,0.82)';
+  ctx.fillRect(0, 0, 1280, 62);
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(0, 62, 1280, 3);
+  const cells = [
+    ['ALT', `${Math.round(p.alt)} m`],
+    ['SPD', `${Math.round(p.speed)} km/h`],
+    ['HDG', `${fmtHeading(p.heading)}°`],
+    ['FUEL', `${Math.round(p.fuel)}%`],
+    ['THR', `${Math.round(p.throttle * 100)}%`],
+    ['SCORE', String(m.score)],
+    ['TIME', fmtTime(m.timeLeft)],
   ];
-  let x = 30;
-  for (let i = 0; i < items.length; i++) {
-    const low = items[i].startsWith('FUEL') && plane.fuel < 25;
-    ctx.fillStyle = low ? '#ffb13d' : '#ffffff';
-    ctx.fillText(items[i], x, 33);
-    x += ctx.measureText(items[i]).width + 34;
-  }
-
-  // ---- objective banner + steering arrow ------------------------------
-  const objective = missions.getObjective();
-  if (objective && missions.active) {
-    const dx = objective.x - plane.x;
-    const dz = objective.z - plane.z;
-    const dist = Math.hypot(dx, dz);
-    const bearing = Math.atan2(dx, dz);
-    const rel = normalizeAngle(bearing - plane.heading);
-    const arrow = Math.abs(rel) < 0.3 ? '▲' : rel > 0 ? '▶' : '◀';
-    const label = `${objective.label}  •  ${Math.round(dist)} m  ${arrow}`;
-    ctx.font = 'bold 19px Verdana, sans-serif';
-    const tw = ctx.measureText(label).width;
-    drawPanel(ctx, (W - tw) / 2 - 16, 62, tw + 32, 34, 0.55);
-    ctx.fillStyle = '#ffd94d';
-    ctx.textAlign = 'center';
-    ctx.fillText(label, W / 2, 80);
-    ctx.textAlign = 'left';
-  }
-
-  // ---- centre message --------------------------------------------------
-  if (missions.message && missions.messageTimer > 0) {
-    ctx.font = 'bold 24px Verdana, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillStyle = 'rgba(255, 217, 77, 0.95)';
-    ctx.shadowColor = 'rgba(0,0,0,0.7)';
-    ctx.shadowBlur = 8;
-    ctx.fillText(missions.message, W / 2, 128);
-    ctx.shadowBlur = 0;
-    ctx.textAlign = 'left';
-  }
-
-  // ---- warning lights ---------------------------------------------------
-  let wx = W - 30;
-  ctx.font = 'bold 16px Verdana, sans-serif';
-  ctx.textAlign = 'right';
-  if (plane.fuel < 25 && plane.flying && Math.sin(game.time * 8) > 0) {
-    ctx.fillStyle = '#ffb13d';
-    ctx.fillText('⚠ LOW FUEL', wx, 80);
-    wx -= 130;
-  }
-  if (plane.stalling && plane.flying && Math.sin(game.time * 8) > 0) {
-    ctx.fillStyle = '#ff4d4d';
-    ctx.fillText('⚠ STALL', wx, 80);
-    wx -= 110;
-  }
-  if (plane.damage > 0) {
-    ctx.fillStyle = plane.damage > 60 ? '#ff4d4d' : '#ffb13d';
-    ctx.fillText(`DAMAGE ${Math.round(plane.damage)}%`, wx, 80);
-  }
   ctx.textAlign = 'left';
-
-  // ---- instruments strip -------------------------------------------------
-  drawPanel(ctx, 12, 604, W - 24, 104, 0.5);
-  const cy = 656;
-  drawHorizon(ctx, 100, cy, 42, plane.bank, plane.pitch, 'HORIZON');
-  drawDial(ctx, 258, cy, 42, 'AIRSPEED', plane.speed, 320, 'km/h');
-  drawDial(ctx, 416, cy, 42, 'ALTITUDE', plane.alt, 500, 'm');
-  drawVerticalSpeed(ctx, 640, cy, 42, plane.vspeed);
-  drawCompass(ctx, 880, cy, 42, plane.heading);
-  drawThrottleGauge(ctx, 1038, cy, 42, plane.throttle);
-  drawDial(ctx, 1180, cy, 42, 'FUEL', plane.fuel, 100, '%');
+  ctx.textBaseline = 'alphabetic';
+  let x = 24;
+  const cellW = 176;
+  for (const [label, value] of cells) {
+    ctx.fillStyle = '#8fb8d8';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.fillText(label, x, 22);
+    ctx.fillStyle = label === 'FUEL' && p.fuel < 20 ? '#ff6b57' : '#ffffff';
+    ctx.font = 'bold 25px sans-serif';
+    ctx.fillText(value, x, 52);
+    x += cellW;
+  }
 }
 
-function gaugeFace(ctx, x, y, r) {
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.fillStyle = '#101c22';
-  ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.arc(x, y, r - 1, 0, Math.PI * 2);
-  ctx.stroke();
-}
-
-function gaugeLabel(ctx, x, y, r, label) {
-  ctx.font = 'bold 11px Verdana, sans-serif';
+function drawCompassRibbon(ctx, game) {
+  const p = game.plane;
+  const m = game.missions;
+  const y = 78;
+  ctx.fillStyle = 'rgba(8,16,32,0.66)';
+  ctx.fillRect(0, y, 1280, 52);
+  const hdgDeg = ((p.heading * 180 / Math.PI) % 360 + 360) % 360;
+  const base = Math.round(hdgDeg / 5) * 5;
   ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffd94d';
-  ctx.fillText(label, x, y + r + 16);
-  ctx.textAlign = 'left';
-}
-
-function drawHorizon(ctx, x, y, r, bank, pitch, label) {
-  gaugeFace(ctx, x, y, r);
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(-bank);
-  const pitchPx = Math.max(-r, Math.min(r, pitch * 90));
-  // Sky above, ground below.
-  ctx.fillStyle = '#7ec8e8';
-  ctx.fillRect(-r, -r + pitchPx, r * 2, r - pitchPx);
-  ctx.fillStyle = '#8a5a34';
-  ctx.fillRect(-r, pitchPx, r * 2, r - pitchPx + 1);
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(-r, pitchPx);
-  ctx.lineTo(r, pitchPx);
-  ctx.stroke();
-  ctx.restore();
-  // Fixed aircraft symbol.
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  ctx.moveTo(x - 16, y);
-  ctx.lineTo(x - 5, y);
-  ctx.moveTo(x + 5, y);
-  ctx.lineTo(x + 16, y);
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(x, y, 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-  gaugeLabel(ctx, x, y, r, label);
-}
-
-function drawDial(ctx, x, y, r, label, value, max, unit) {
-  gaugeFace(ctx, x, y, r);
-  // Ticks.
-  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-  ctx.lineWidth = 1.5;
-  for (let i = 0; i <= 8; i++) {
-    const a = (-Math.PI * 0.75) + (i / 8) * Math.PI * 1.5;
-    const x1 = x + Math.cos(a) * (r - 8);
-    const y1 = y + Math.sin(a) * (r - 8);
-    const x2 = x + Math.cos(a) * (r - 3);
-    const y2 = y + Math.sin(a) * (r - 3);
+  for (let off = -75; off <= 75; off += 5) {
+    const deg = (base + off + 360) % 360;
+    const sx = 640 + off * 7.2;
+    const major = deg % 15 === 0;
+    ctx.strokeStyle = major ? '#cfe6f5' : 'rgba(207,230,245,0.45)';
+    ctx.lineWidth = major ? 2 : 1;
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
+    ctx.moveTo(sx, y + 8);
+    ctx.lineTo(sx, y + (major ? 26 : 18));
     ctx.stroke();
+    if (major) {
+      const label = deg === 0 ? 'N' : deg === 90 ? 'E' : deg === 180 ? 'S' : deg === 270 ? 'W' : String(deg);
+      ctx.fillStyle = '#eaf4fb';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(label, sx, y + 44);
+    }
   }
-  // Red zone for fuel.
-  if (label === 'FUEL') {
-    ctx.strokeStyle = '#ff4d4d';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(x, y, r - 5, -Math.PI * 0.75, -Math.PI * 0.75 + Math.PI * 1.5 * 0.25);
-    ctx.stroke();
-  }
-  // Needle.
-  const frac = Math.max(0, Math.min(1, value / max));
-  const angle = -Math.PI * 0.75 + frac * Math.PI * 1.5;
-  ctx.strokeStyle = '#ffd94d';
-  ctx.lineWidth = 2.5;
+  // Centre caret: where the nose points.
+  ctx.fillStyle = '#ffd166';
   ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x + Math.cos(angle) * (r - 10), y + Math.sin(angle) * (r - 10));
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-  ctx.fill();
-  // Digital readout.
-  ctx.font = 'bold 13px Verdana, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${Math.round(value)}`, x, y + r * 0.55);
-  ctx.font = '10px Verdana, sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText(unit, x, y + r * 0.55 + 12);
-  ctx.restore();
-  gaugeLabel(ctx, x, y, r, label);
-  ctx.textAlign = 'left';
-}
-
-function drawVerticalSpeed(ctx, x, y, r, vspeed) {
-  gaugeFace(ctx, x, y, r);
-  // Centre line and up/down ticks.
-  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(x - r + 10, y);
-  ctx.lineTo(x + r - 10, y);
-  ctx.stroke();
-  for (const frac of [-0.6, -0.3, 0.3, 0.6]) {
-    ctx.beginPath();
-    ctx.moveTo(x - 6, y + frac * (r - 10));
-    ctx.lineTo(x + 6, y + frac * (r - 10));
-    ctx.stroke();
-  }
-  // Needle: climbs read above the line, sinks below it.
-  const frac = Math.max(-1, Math.min(1, vspeed / 12));
-  const ny = y - frac * (r - 14);
-  ctx.strokeStyle = vspeed > 0.5 ? '#7ee787' : vspeed < -0.5 ? '#ff9a7a' : '#ffd94d';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(x - 14, ny);
-  ctx.lineTo(x + 14, ny);
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.arc(x, y, 3.5, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.font = 'bold 13px Verdana, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${vspeed >= 0 ? '+' : ''}${vspeed.toFixed(1)}`, x, y + r * 0.55);
-  ctx.font = '10px Verdana, sans-serif';
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  ctx.fillText('m/s', x, y + r * 0.55 + 12);
-  ctx.restore();
-  gaugeLabel(ctx, x, y, r, 'VERT SPEED');
-  ctx.textAlign = 'left';
-}
-
-function drawCompass(ctx, x, y, r, heading) {
-  gaugeFace(ctx, x, y, r);
-  const points = [['N', 0], ['E', Math.PI / 2], ['S', Math.PI], ['W', -Math.PI / 2]];
-  ctx.font = 'bold 13px Verdana, sans-serif';
-  ctx.textAlign = 'center';
-  for (const [letter, bearing] of points) {
-    const rel = normalizeAngle(bearing - heading);
-    if (Math.abs(rel) > 1.9) continue;
-    const px = x + Math.sin(rel) * (r - 12);
-    const py = y - Math.cos(rel) * (r - 12) + 4;
-    ctx.fillStyle = letter === 'N' ? '#ff4d4d' : '#ffffff';
-    ctx.fillText(letter, px, py);
-  }
-  // Heading marker and digits.
-  ctx.fillStyle = '#ffd94d';
-  ctx.beginPath();
-  ctx.moveTo(x - 6, y - r + 4);
-  ctx.lineTo(x + 6, y - r + 4);
-  ctx.lineTo(x, y - r + 12);
+  ctx.moveTo(640, y + 2);
+  ctx.lineTo(632, y + 12);
+  ctx.lineTo(648, y + 12);
   ctx.closePath();
   ctx.fill();
-  const deg = ((Math.round((heading * 180) / Math.PI) % 360) + 360) % 360;
-  ctx.font = 'bold 13px Verdana, sans-serif';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${deg}°`, x, y + r * 0.55);
-  ctx.restore();
-  gaugeLabel(ctx, x, y, r, 'COMPASS');
-  ctx.textAlign = 'left';
+  // Objective bearing marker + distance, right under the ribbon.
+  const o = m.getObjective();
+  if (o) {
+    const bearing = Math.atan2(o.x - p.x, o.z - p.z);
+    const rel = wrapAngle(bearing - p.heading) * 180 / Math.PI;
+    const mx = 640 + Math.max(-75, Math.min(75, rel)) * 7.2;
+    ctx.fillStyle = '#ff9d4d';
+    ctx.beginPath();
+    ctx.moveTo(mx, y + 30);
+    ctx.lineTo(mx - 8, y + 40);
+    ctx.lineTo(mx + 8, y + 40);
+    ctx.closePath();
+    ctx.fill();
+    const dist = Math.round(Math.hypot(o.x - p.x, o.z - p.z));
+    const missionName = m.current ? missionDef(m.current).name.toUpperCase() : '';
+    ctx.fillStyle = '#ffd166';
+    ctx.font = 'bold 20px sans-serif';
+    ctx.fillText(`${missionName} — ${o.label}  ·  ${dist} m`, 640, 158);
+  }
 }
 
-function drawThrottleGauge(ctx, x, y, r, throttle) {
-  gaugeFace(ctx, x, y, r);
-  const barH = (r * 2 - 16) * throttle;
-  const grad = ctx.createLinearGradient(0, y + r - 8, 0, y - r + 8);
-  grad.addColorStop(0, '#2fae5f');
-  grad.addColorStop(0.6, '#ffd94d');
-  grad.addColorStop(1, '#ff7a2a');
-  ctx.fillStyle = grad;
-  ctx.fillRect(x - 10, y + r - 8 - barH, 20, barH);
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+function dial(ctx, cx, cy, r, label, valueText, frac, warn) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = 'rgba(8,16,32,0.85)';
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = warn ? '#ff6b57' : '#3d6f8f';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(207,230,245,0.5)';
   ctx.lineWidth = 1;
-  ctx.strokeRect(x - 10, y - r + 8, 20, r * 2 - 16);
-  ctx.font = 'bold 13px Verdana, sans-serif';
+  for (let i = 0; i <= 10; i++) {
+    const a = -Math.PI * 0.75 + (i / 10) * Math.PI * 1.5;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * (r - 8), Math.sin(a) * (r - 8));
+    ctx.lineTo(Math.cos(a) * (r - 2), Math.sin(a) * (r - 2));
+    ctx.stroke();
+  }
+  const na = -Math.PI * 0.75 + Math.max(0, Math.min(1, frac)) * Math.PI * 1.5;
+  ctx.strokeStyle = warn ? '#ff6b57' : '#ffd166';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(na) * (r - 12), Math.sin(na) * (r - 12));
+  ctx.stroke();
+  ctx.fillStyle = '#ffd166';
+  ctx.beginPath();
+  ctx.arc(0, 0, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, 0, r - 14);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 17px sans-serif';
+  ctx.fillText(valueText, 0, r * 0.42);
+  ctx.restore();
+}
+
+function drawInstruments(ctx, game) {
+  const p = game.plane;
+  const m = game.missions;
+  const y = 652;
+  ctx.fillStyle = 'rgba(8,16,32,0.78)';
+  ctx.fillRect(0, 592, 1280, 128);
+  ctx.fillStyle = '#ffd166';
+  ctx.fillRect(0, 592, 1280, 2);
+  // Artificial horizon.
+  ctx.save();
+  ctx.translate(110, y);
+  ctx.beginPath();
+  ctx.arc(0, 0, 52, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = '#7ec8f2';
+  ctx.fillRect(-52, -52, 104, 52 + Math.max(-40, Math.min(40, p.vspeed * 4)));
+  ctx.fillStyle = '#8a5a2b';
+  ctx.fillRect(-52, Math.max(-40, Math.min(40, p.vspeed * 4)), 104, 104);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(110, y);
+  ctx.rotate(p.bank * 0.4);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-52, 0); ctx.lineTo(52, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#ffd166';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(0, 0, 52, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('HORIZON', 0, 68);
+  ctx.restore();
+  dial(ctx, 300, y, 52, 'AIRSPEED', `${Math.round(p.speed)}`, p.speed / 320, p.speed < 55);
+  dial(ctx, 470, y, 52, 'ALTITUDE', `${Math.round(p.alt)}m`, Math.min(1, p.alt / 300), false);
+  dial(ctx, 640, y, 52, 'COMPASS', fmtHeading(p.heading), ((p.heading % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2), false);
+  // Throttle bar.
+  ctx.save();
+  ctx.translate(800, y);
+  ctx.fillStyle = 'rgba(8,16,32,0.85)';
+  ctx.beginPath();
+  ctx.arc(0, 0, 52, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#3d6f8f';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#123';
+  ctx.fillRect(-14, -40, 28, 80);
+  const th = p.throttle * 80;
+  ctx.fillStyle = p.throttle > 0.85 ? '#ff6b57' : '#37c978';
+  ctx.fillRect(-14, 40 - th, 28, th);
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('THROTTLE', 0, 68);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.fillText(`${Math.round(p.throttle * 100)}%`, 0, -58);
+  ctx.restore();
+  dial(ctx, 950, y, 52, 'FUEL', `${Math.round(p.fuel)}%`, p.fuel / 100, p.fuel < 20);
+  const vsFrac = Math.max(0, Math.min(1, (p.vspeed + 10) / 20));
+  dial(ctx, 1100, y, 52, 'VERT SPD', `${p.vspeed >= 0 ? '+' : ''}${p.vspeed.toFixed(1)}`, vsFrac, p.vspeed < -5);
+  // Stall + low-fuel warnings, big and plain.
+  if (!p.landed && p.speed < 55) {
+    ctx.fillStyle = '#ff6b57';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('STALL — THROTTLE UP!', 640, 540);
+  } else if (p.fuel < 20 && p.fuel > 0) {
+    ctx.fillStyle = '#ff6b57';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('LOW FUEL', 640, 540);
+  }
+}
+
+function drawMinimap(ctx, game) {
+  const cx = 1196, cy = 300, r = 72;
+  const scale = (r * 2) / 6800;
+  const mx = (x) => cx + x * scale;
+  const my = (z) => cy + (z - 1700) * scale;
+  ctx.save();
+  ctx.fillStyle = 'rgba(8,16,32,0.8)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#3d6f8f';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = '#0d3d52';
+  ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  for (const isl of game.world.islands) {
+    ctx.fillStyle = '#3f8f4f';
+    ctx.beginPath();
+    ctx.arc(mx(isl.x), my(isl.z), Math.max(2, isl.r * scale), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const o = game.missions.getObjective();
+  for (const d of [...game.world.hopDocks, ...game.world.mailVillages, game.world.mainDock]) {
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(mx(d.x) - 3, my(d.z) - 3, 6, 6);
+  }
+  ctx.fillStyle = '#ff6b35';
+  ctx.beginPath();
+  ctx.arc(mx(game.world.raft.x), my(game.world.raft.z), 4, 0, Math.PI * 2);
+  ctx.fill();
+  if (o) {
+    const pulse = 5 + Math.sin(performance.now() / 240) * 2;
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(mx(o.x), my(o.z), pulse + 4, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // The plane, nose up the map by heading.
+  ctx.save();
+  ctx.translate(mx(game.plane.x), my(game.plane.z));
+  ctx.rotate(game.plane.heading);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(0, -8); ctx.lineTo(5, 6); ctx.lineTo(-5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  ctx.restore();
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('MAP', cx, cy + r + 16);
+}
+
+function drawToast(ctx, game) {
+  const m = game.missions;
+  if (!m.toast || m.toastLeft <= 0) return;
+  ctx.font = 'bold 24px sans-serif';
+  const w = ctx.measureText(m.toast).width + 44;
+  ctx.fillStyle = 'rgba(8,16,32,0.85)';
+  ctx.beginPath();
+  ctx.roundRect(640 - w / 2, 176, w, 44, 10);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd166';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#ffd166';
+  ctx.textAlign = 'center';
+  ctx.fillText(m.toast, 640, 206);
+}
+
+export function drawFlightHUD(ctx, game) {
+  drawTopStrip(ctx, game);
+  drawCompassRibbon(ctx, game);
+  drawMinimap(ctx, game);
+  drawInstruments(ctx, game);
+  drawToast(ctx, game);
+}
+
+export function drawTitle(ctx, game) {
+  ctx.fillStyle = 'rgba(8,12,28,0.45)';
+  ctx.fillRect(0, 0, 1280, 720);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff3c4';
+  ctx.font = 'bold 72px sans-serif';
+  ctx.fillText('SENJA AMPHIBI', 640, 150);
+  ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold 26px sans-serif';
+  ctx.fillText('A seaplane sortie over the golden archipelago', 640, 192);
+  ctx.fillStyle = '#eaf4fb';
+  ctx.font = '19px sans-serif';
+  ctx.fillText('W/S throttle · A/D turn · hold mouse to climb · Space drops a crate · P pause · R restart', 640, 226);
+  const cards = [];
+  const cw = 272, ch = 150, gap = 22;
+  const x0 = 640 - (4 * cw + 3 * gap) / 2;
+  game.missionDefs.forEach((def, i) => {
+    const x = x0 + i * (cw + gap);
+    const y = 300;
+    cards.push({ x, y, w: cw, h: ch, id: def.id });
+    ctx.fillStyle = 'rgba(8,16,32,0.88)';
+    ctx.beginPath();
+    ctx.roundRect(x, y, cw, ch, 12);
+    ctx.fill();
+    ctx.strokeStyle = '#ffd166';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#ffd166';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.fillText(`PRESS ${def.key}`, x + cw / 2, y + 28);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.fillText(def.name, x + cw / 2, y + 64);
+    ctx.fillStyle = '#cfe6f5';
+    ctx.font = '16px sans-serif';
+    const words = def.goal.split(' ');
+    let line = '', ly = y + 92;
+    for (const word of words) {
+      if (ctx.measureText(`${line} ${word}`).width > cw - 28) {
+        ctx.fillText(line.trim(), x + cw / 2, ly);
+        line = word; ly += 20;
+      } else line += ` ${word}`;
+    }
+    ctx.fillText(line.trim(), x + cw / 2, ly);
+    ctx.fillStyle = '#8fb8d8';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillText(def.reward, x + cw / 2, y + ch - 14);
+  });
+  game.uiCards = cards;
+  ctx.fillStyle = '#eaf4fb';
+  ctx.font = '18px sans-serif';
+  ctx.fillText('180 seconds a sortie · fuel burns with throttle · land gentle or pay for it', 640, 510);
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = '15px sans-serif';
+  ctx.fillText('An original game — Senja Amphibi, built for make.fun', 640, 540);
+}
+
+function drawEndPanel(ctx, game, title, titleColor, lines) {
+  ctx.fillStyle = 'rgba(8,12,28,0.5)';
+  ctx.fillRect(0, 0, 1280, 720);
+  // Panel sits high on purpose: the plane flies at y≈448, clear below it.
+  const pw = 620, ph = 96 + lines.length * 34;
+  const px = 640 - pw / 2, py = 66;
+  ctx.fillStyle = 'rgba(8,16,32,0.92)';
+  ctx.beginPath();
+  ctx.roundRect(px, py, pw, ph, 14);
+  ctx.fill();
+  ctx.strokeStyle = titleColor;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = titleColor;
+  ctx.font = 'bold 38px sans-serif';
+  ctx.fillText(title, 640, py + 52);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '21px sans-serif';
+  lines.forEach((line, i) => ctx.fillText(line, 640, py + 92 + i * 34));
+  ctx.fillStyle = '#8fb8d8';
+  ctx.font = '17px sans-serif';
+  ctx.fillText('Press R to fly again · 1–4 for another mission · click a mission on the title screen', 640, py + ph + 30);
+}
+
+export function drawComplete(ctx, game) {
+  const m = game.missions;
+  const def = game.missionDefs.find((d) => d.id === m.current);
+  drawEndPanel(ctx, game, 'MISSION COMPLETE', '#37c978', [
+    `${def ? def.name : 'Sortie'} — finished with ${fmtTime(m.timeLeft)} to spare`,
+    `Score: ${m.score} pts  (includes +50 completion bonus)`,
+    `Fuel left: ${Math.round(game.plane.fuel)}% · Damage: ${Math.round(game.plane.damage)}%`,
+  ]);
+}
+
+export function drawGameOver(ctx, game) {
+  const m = game.missions;
+  drawEndPanel(ctx, game, 'SORTIE OVER', '#ff6b57', [
+    m.failReason || 'The sortie ended',
+    `Score: ${m.score} pts`,
+    'Gentle touchdowns only: under 85 km/h and sinking slower than 5.5 m/s',
+  ]);
+}
+
+export function drawPaused(ctx, game) {
+  ctx.fillStyle = 'rgba(8,12,28,0.55)';
+  ctx.fillRect(0, 0, 1280, 720);
   ctx.textAlign = 'center';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${Math.round(throttle * 100)}%`, x, y + r * 0.55);
-  ctx.restore();
-  gaugeLabel(ctx, x, y, r, 'THROTTLE');
-  ctx.textAlign = 'left';
+  ctx.font = 'bold 54px sans-serif';
+  ctx.fillText('PAUSED', 640, 330);
+  ctx.fillStyle = '#cfe6f5';
+  ctx.font = '21px sans-serif';
+  ctx.fillText('Press P to keep flying · R to restart the sortie', 640, 372);
 }

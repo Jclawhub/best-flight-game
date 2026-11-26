@@ -1,91 +1,72 @@
-// Deterministic staged scenes for screenshots.
-// ?shot=<name>&seed=<n> freezes the game in a composed state: the title
-// screen's backdrop, a takeoff, a ring pass, a dock approach, or the mission
-// complete screen. Nothing random leaks in — the same shot always renders
-// the same frame, so the screenshots are reproducible.
+// Senja Amphibi — deterministic screenshot staging for ?shot=<name>&seed=<n>.
+// Each stage freezes one readable moment: takeoff, a ring, the rescue and
+// the mission-complete screen with the panel clear of the aircraft.
 
-export const SHOT_NAMES = ['start', 'rings', 'landing', 'complete', 'title'];
+import { buildWorld } from './world.js';
 
-// A plain title-screen shot, for checking the menu backdrop renders.
-function applyTitleShot(game) {
-  game.state = 'title';
-  game.selectedMission = 0;
-  game.titleHeading = 0.7;
-  game.frozen = true;
-  game.time = 42.5;
-  return true;
-}
+export const SHOT_NAMES = ['takeoff', 'rings', 'rescue', 'complete'];
 
-export function applyShot(game, name, seed = 1) {
-  const { plane, missions, world } = game;
-  void seed;
-  game.frozen = true;
-  game.time = 42.5; // fixed golden-hour moment for every shot
-  if (name === 'title') return applyTitleShot(game);
-  if (name === 'start') {
-    missions.start('rings');
-    missions.timeLeft = 180;
-    plane.reset(0, 60, 0);
-    plane.throttle = 0.65;
-    plane.speed = 42;
-    plane.landed = true;
-    game.state = 'flying';
-    game.time = 42.5;
-    return true;
+export function applyShot(game, name, seed) {
+  if (seed) {
+    game.world = buildWorld(seed);
+    game.missions.world = game.world;
+  }
+  const p = game.plane;
+  const m = game.missions;
+  if (name === 'takeoff') {
+    game.startMission('rings');
+    // 600 m out from ring 1, climbing out at ring height: the ring sits
+    // big and clean below the objective line instead of behind the HUD.
+    const dx = 150, dz = 600;
+    const len = Math.hypot(dx, dz);
+    const ux = dx / len, uz = dz / len;
+    p.x = 150 - ux * 600; p.z = 600 - uz * 600;
+    p.heading = Math.atan2(ux, uz);
+    p.alt = 95; p.speed = 150; p.throttle = 0.8;
+    p.vspeed = 2; p.landed = false;
+    game.state = 'staging';
+    return;
   }
   if (name === 'rings') {
-    missions.start('rings');
-    missions.timeLeft = 141;
-    missions.score = 210;
-    world.rings[0].passed = true;
-    world.rings[1].passed = true;
-    missions.ringIndex = 2;
-    // Head straight for ring 3 (index 2) at (1300, 130, 900): the gold
-    // next ring dead ahead, islands below, sun low behind the plane.
-    plane.reset(950, 1100, Math.atan2(1300 - 950, 900 - 1100));
-    plane.throttle = 0.8;
-    plane.speed = 214;
-    plane.alt = 158;
-    plane.vspeed = 1.5;
-    plane.landed = false;
-    plane.bank = 0.12;
-    game.state = 'flying';
-    return true;
+    game.startMission('rings');
+    m.ringIndex = 1;
+    m.score = 100;
+    // 320 m out from ring 2, on the line in from ring 1, at ring altitude.
+    const dx = -250 - 150, dz = 1150 - 600;
+    const len = Math.hypot(dx, dz);
+    const ux = dx / len, uz = dz / len;
+    p.x = -250 - ux * 320; p.z = 1150 - uz * 320;
+    p.heading = Math.atan2(ux, uz);
+    p.alt = 95; p.speed = 210; p.throttle = 0.66;
+    p.vspeed = 0; p.landed = false;
+    game.state = 'staging';
+    return;
   }
-  if (name === 'landing') {
-    missions.start('hop');
-    missions.timeLeft = 96;
-    missions.score = 150;
-    missions.dockIndex = 1;
-    world.docks.filter((d) => d.kind === 'lagoon')[0].done = true;
-    // On final approach to lagoon 2: low, slow, dock clearly ahead.
-    const dock = world.docks.filter((d) => d.kind === 'lagoon')[1];
-    plane.reset(dock.x + 80, dock.z - 260, 0);
-    plane.heading = Math.atan2(dock.x - plane.x, dock.z - plane.z);
-    plane.throttle = 0.35;
-    plane.speed = 68;
-    plane.alt = 24;
-    plane.vspeed = -2;
-    plane.landed = false;
-    game.state = 'flying';
-    return true;
+  if (name === 'rescue') {
+    game.startMission('rescue');
+    // 260 m out from the raft, inbound from the main dock, low and slow.
+    const dx = 700 - (-260), dz = 1750 - 650;
+    const len = Math.hypot(dx, dz);
+    const ux = dx / len, uz = dz / len;
+    p.x = 700 - ux * 260; p.z = 1750 - uz * 260;
+    p.heading = Math.atan2(ux, uz);
+    p.alt = 24; p.speed = 95; p.throttle = 0.3;
+    p.vspeed = -2; p.landed = false;
+    game.state = 'staging';
+    return;
   }
   if (name === 'complete') {
-    missions.start('rings');
-    missions.score = 1240;
-    missions.timeLeft = 47;
-    missions.ringIndex = 6; // all six rings flown, so the summary reads 6/6
-    missions.complete = true;
-    missions.message = 'MISSION COMPLETE — time bonus +235';
-    missions.messageTimer = 6;
-    for (const ring of world.rings) ring.passed = true;
-    plane.reset(900, 1900, 0.6);
-    plane.throttle = 0.55;
-    plane.speed = 180;
-    plane.alt = 190;
-    plane.landed = false;
+    game.startMission('hop');
+    m.dockIndex = 3;
+    m.score = 500;
+    m.complete = true;
+    m.timeLeft = 64;
+    p.x = 200; p.z = 3300;
+    p.heading = Math.atan2(150, 350);
+    p.alt = 45; p.speed = 120; p.throttle = 0.4;
+    p.vspeed = 0; p.landed = false;
     game.state = 'complete';
-    return true;
+    return;
   }
-  return false;
+  game.state = 'title';
 }

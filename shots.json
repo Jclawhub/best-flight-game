@@ -1,18 +1,1 @@
-[
-  {
-    "name": "1-start.jpg",
-    "query": "?shot=start&seed=1"
-  },
-  {
-    "name": "2-rings.jpg",
-    "query": "?shot=rings&seed=1"
-  },
-  {
-    "name": "3-landing.jpg",
-    "query": "?shot=landing&seed=1"
-  },
-  {
-    "name": "4-complete.jpg",
-    "query": "?shot=complete&seed=1"
-  }
-]
+{"shots":[{"file":"1-takeoff.jpg","mission":"rings","seed":1,"shot":"takeoff"},{"file":"2-rings.jpg","mission":"rings","seed":1,"shot":"rings"},{"file":"3-rescue.jpg","mission":"rescue","seed":1,"shot":"rescue"},{"file":"4-complete.jpg","mission":"hop","seed":1,"shot":"complete"}]}
