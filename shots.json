@@ -1,1 +1,18 @@
-{"shots":[{"file":"1-cockpit.jpg","mission":"rings","seed":1,"shot":"cockpit"},{"file":"2-rescue.jpg","mission":"rescue","seed":1,"shot":"rescue"},{"file":"3-landing.jpg","mission":"hop","seed":1,"shot":"landing"},{"file":"4-complete.jpg","mission":"hop","seed":1,"shot":"complete"}]}
+[
+  {
+    "name": "1-cockpit.jpg",
+    "query": "?shot=cockpit&seed=1"
+  },
+  {
+    "name": "2-rescue.jpg",
+    "query": "?shot=rescue&seed=1"
+  },
+  {
+    "name": "3-landing.jpg",
+    "query": "?shot=landing&seed=1"
+  },
+  {
+    "name": "4-complete.jpg",
+    "query": "?shot=complete&seed=1"
+  }
+]

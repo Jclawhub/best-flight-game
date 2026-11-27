@@ -1,577 +1,523 @@
-// Senja Amphibi — HUD: top strip, compass ribbon, minimap, view pill,
-// instrument dials (shared by the chase strip and the cockpit dashboard),
-// title / complete / game-over / paused screens. All text English.
+// hud.js — the DOM HUD: top instrument strip, objective chip, compass ribbon,
+// live minimap, toast banners, screens, and the seven lit cockpit gauges.
+// All drawing is 2D canvas; the WebGL canvas stays underneath.
 
-export const VIEW_PILL = { x: 1080, y: 400, w: 180, h: 36 };
+import { mat4Multiply, mat4TransformPoint } from './gl.js';
 
-const GOLD = '#c9a24d';
-const PANEL = '#0e1430';
-const LABEL_BLUE = '#8fb8d8';
-
-function clamp(v, lo, hi) {
-  return Math.max(lo, Math.min(hi, v));
-}
-
-function normDeg(a) {
-  while (a > 180) a -= 360;
-  while (a < -180) a += 360;
-  return a;
-}
-
-function fmtTime(s) {
-  const t = Math.max(0, Math.ceil(s));
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
-}
-
-function headingDeg(game) {
-  return ((game.plane.heading * 180 / Math.PI) % 360 + 360) % 360;
-}
-
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, r);
-}
-
-function drawDial(ctx, x, cy, r, label, valueText, frac, needle, lit) {
-  // Dark dial face with gold ring; in cockpit mode the ring glows so the
-  // panel reads as lit instruments rather than flat circles.
-  ctx.save();
-  if (lit) {
-    ctx.shadowColor = 'rgba(255, 211, 77, 0.55)';
-    ctx.shadowBlur = 14;
+export function createHud(doc) {
+  const $ = (id) => doc.getElementById(id);
+  const hud = {
+    root: $('hud'),
+    stats: {
+      alt: $('stat-alt'), spd: $('stat-spd'), hdg: $('stat-hdg'),
+      fuel: $('stat-fuel'), thr: $('stat-thr'), score: $('stat-score'),
+      time: $('stat-time'),
+    },
+    objective: $('objective'),
+    compass: $('compass'),
+    minimap: $('minimap'),
+    toast: $('toast'),
+    cockpit: $('cockpit'),
+    glare: $('glare'),
+    markers: $('markers'),
+    screens: {
+      title: $('screen-title'),
+      pause: $('screen-pause'),
+      complete: $('screen-complete'),
+      gameover: $('screen-gameover'),
+    },
+    completeTitle: $('complete-title'),
+    completeScore: $('complete-score'),
+    gameoverReason: $('gameover-reason'),
+    gameoverScore: $('gameover-score'),
+    gauges: {},
+  };
+  for (const name of ['horizon', 'airspeed', 'altimeter', 'compass', 'throttle', 'fuel', 'vspeed']) {
+    hud.gauges[name] = $('gauge-' + name);
   }
-  ctx.fillStyle = '#0a1226';
+  return hud;
+}
+
+function fmtTime(t) {
+  const s = Math.max(0, Math.ceil(t));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function headingDeg(h) {
+  let d = (h * 180) / Math.PI;
+  d = ((d % 360) + 360) % 360;
+  return d;
+}
+
+// ---- compass ribbon ----
+function drawCompass(canvas, heading, objectiveBearing) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(8, 14, 20, 0.72)';
+  ctx.fillRect(0, 0, w, h);
+  const pxPerDeg = w / 120; // 120° visible window
+  const centre = headingDeg(heading);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 14px system-ui, sans-serif';
+  for (let d = -60; d <= 60; d += 5) {
+    let deg = Math.round(centre + d);
+    const x = w / 2 + d * pxPerDeg;
+    const norm = ((deg % 360) + 360) % 360;
+    const major = norm % 30 === 0;
+    const cardinal = norm % 90 === 0;
+    ctx.strokeStyle = major ? '#ffd27a' : 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = major ? 2.5 : 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, h - 4);
+    ctx.lineTo(x, h - (major ? 18 : 11));
+    ctx.stroke();
+    if (cardinal) {
+      const label = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' }[norm];
+      ctx.fillStyle = '#ffd27a';
+      ctx.fillText(label, x, 11);
+    } else if (major) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(String(norm), x, 11);
+    }
+  }
+  // Objective marker: a diamond at the relative bearing.
+  if (objectiveBearing !== null && objectiveBearing !== undefined) {
+    let rel = headingDeg(objectiveBearing - heading);
+    if (rel > 180) rel -= 360;
+    if (Math.abs(rel) <= 62) {
+      const x = w / 2 + rel * pxPerDeg;
+      ctx.fillStyle = '#ff7a1a';
+      ctx.beginPath();
+      ctx.moveTo(x, 22);
+      ctx.lineTo(x + 8, 29);
+      ctx.lineTo(x, 36);
+      ctx.lineTo(x - 8, 29);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  // Centre lubber line.
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(w / 2 - 1, 0, 2, 6);
+}
+
+// ---- minimap ----
+function drawMinimap(canvas, world, plane, objective, mission) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const S = w / 6800; // world 6800 m across -> canvas
+  const toX = (x) => w / 2 + x * S;
+  const toY = (z) => h / 2 + z * S;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(6, 32, 44, 0.85)';
+  ctx.fillRect(0, 0, w, h);
+  // Islands.
+  for (const isl of world.islands) {
+    ctx.fillStyle = '#3f7a34';
+    ctx.beginPath();
+    ctx.arc(toX(isl.x), toY(isl.z), Math.max(2, isl.r * S), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#c9b078';
+    ctx.beginPath();
+    ctx.arc(toX(isl.x), toY(isl.z), Math.max(2, isl.r * S * 1.06), 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Docks.
+  const dockDot = (d, color) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(toX(d.x) - 3, toY(d.z) - 3, 6, 6);
+  };
+  dockDot(world.mainDock, '#ffd27a');
+  for (const d of world.hopDocks) dockDot(d, '#ff7a1a');
+  for (const d of world.mailDocks) dockDot(d, '#7ac8ff');
+  // Raft.
+  ctx.fillStyle = '#ff3b30';
   ctx.beginPath();
-  ctx.arc(x, cy, r, 0, Math.PI * 2);
+  ctx.arc(toX(world.raft.x), toY(world.raft.z), 4, 0, Math.PI * 2);
   ctx.fill();
-  ctx.strokeStyle = lit ? '#ffd34d' : '#3d6f8f';
-  ctx.lineWidth = 2;
+  // Rings (faint circles).
+  ctx.strokeStyle = 'rgba(255, 150, 40, 0.7)';
+  ctx.lineWidth = 1;
+  for (const r of world.rings) {
+    ctx.beginPath();
+    ctx.arc(toX(r.x), toY(r.z), 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Objective pulse.
+  if (objective) {
+    const pulse = 6 + 2 * Math.sin(Date.now() / 250);
+    ctx.strokeStyle = '#ff7a1a';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(toX(objective.x), toY(objective.z), pulse, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  // Plane arrow.
+  const px = toX(plane.x), py = toY(plane.z);
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(plane.heading);
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.moveTo(0, -7);
+  ctx.lineTo(5, 6);
+  ctx.lineTo(0, 3);
+  ctx.lineTo(-5, 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  void mission;
+}
+
+// ---- cockpit gauges (small 2D canvases) ----
+function gaugeFace(ctx, w, h, label) {
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#0c1216';
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, w / 2 - 2, 0, Math.PI * 2);
+  ctx.fill();
+  // Lit gold rim: the dials must read as glowing instruments, not dark discs.
+  ctx.strokeStyle = '#ffd27a';
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = '#ffb347';
+  ctx.shadowBlur = 12;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffd27a';
+  ctx.font = 'bold 10px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(label, w / 2, h - 7);
+}
+
+function gaugeNeedle(ctx, w, h, angle, color = '#ff5a2a') {
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(angle);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.moveTo(0, 6);
+  ctx.lineTo(0, -w / 2 + 12);
   ctx.stroke();
   ctx.restore();
-  // Tick marks around the rim.
-  ctx.strokeStyle = 'rgba(160, 200, 230, 0.7)';
-  ctx.lineWidth = 1.5;
-  for (let i = 0; i <= 10; i++) {
-    const a = (-120 + i * 24) * Math.PI / 180;
-    const x1 = x + Math.sin(a) * (r - 4);
-    const y1 = cy - Math.cos(a) * (r - 4);
-    const x2 = x + Math.sin(a) * (r - 10);
-    const y2 = cy - Math.cos(a) * (r - 10);
+  ctx.fillStyle = '#e8eef2';
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function gaugeTicks(ctx, w, h, min, max, step, valueToAngle) {
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillStyle = '#e8f2f6';
+  ctx.font = '8px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (let v = min; v <= max; v += step) {
+    const a = valueToAngle(v);
+    const x1 = w / 2 + Math.sin(a) * (w / 2 - 10);
+    const y1 = h / 2 - Math.cos(a) * (w / 2 - 10);
+    const x2 = w / 2 + Math.sin(a) * (w / 2 - 15);
+    const y2 = h / 2 - Math.cos(a) * (w / 2 - 15);
     ctx.beginPath();
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.stroke();
+    const tx = w / 2 + Math.sin(a) * (w / 2 - 22);
+    const ty = h / 2 - Math.cos(a) * (w / 2 - 22) + 3;
+    ctx.fillText(String(v), tx, ty);
   }
-  if (needle) {
-    // Needle stops at 62% of the radius, so it can never reach the value
-    // text printed low inside the dial (round-2 nit: "100%" over the needle).
-    const a = (-120 + clamp(frac, 0, 1) * 240) * Math.PI / 180;
-    const len = r * 0.62;
+}
+
+function drawHorizon(canvas, bank, pitch) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  gaugeFace(ctx, w, h, 'ATT');
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, w / 2 - 3, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(-bank);
+  const py = Math.max(-20, Math.min(20, pitch * 40));
+  ctx.translate(0, py);
+  ctx.fillStyle = '#2f7fc4';
+  ctx.fillRect(-w, -h, w * 2, h);
+  ctx.fillStyle = '#7a5230';
+  ctx.fillRect(-w, 0, w * 2, h);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-w, 0);
+  ctx.lineTo(w, 0);
+  ctx.stroke();
+  ctx.restore();
+  // Fixed aircraft symbol.
+  ctx.strokeStyle = '#ffd27a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(w / 2 - 12, h / 2);
+  ctx.lineTo(w / 2 + 12, h / 2);
+  ctx.moveTo(w / 2, h / 2);
+  ctx.lineTo(w / 2, h / 2 + 5);
+  ctx.stroke();
+}
+
+function drawDial(canvas, label, value, min, max, step, unit) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  gaugeFace(ctx, w, h, label);
+  const toAngle = (v) => -Math.PI * 0.75 + ((v - min) / (max - min)) * Math.PI * 1.5;
+  gaugeTicks(ctx, w, h, min, max, step, toAngle);
+  gaugeNeedle(ctx, w, h, toAngle(Math.max(min, Math.min(max, value))));
+  ctx.fillStyle = '#e8eef2';
+  ctx.font = 'bold 12px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.round(value)}${unit}`, w / 2, h / 2 + 16);
+}
+
+function drawCompassGauge(canvas, heading) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  gaugeFace(ctx, w, h, 'HDG');
+  const deg = headingDeg(heading);
+  ctx.save();
+  ctx.translate(w / 2, h / 2);
+  ctx.rotate(-heading);
+  ctx.fillStyle = '#cfe3ea';
+  ctx.font = 'bold 9px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  for (const [d, label] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) {
+    const a = (d * Math.PI) / 180;
+    ctx.fillText(label, Math.sin(a) * (w / 2 - 16), -Math.cos(a) * (w / 2 - 16) + 3);
+  }
+  ctx.strokeStyle = '#ff5a2a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, -w / 2 + 8);
+  ctx.lineTo(0, -w / 2 + 16);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#e8eef2';
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.round(deg)}°`, w / 2, h / 2 + 5);
+}
+
+function drawThrottleGauge(canvas, throttle) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  gaugeFace(ctx, w, h, 'THR');
+  const bh = h - 26;
+  const y0 = h - 12;
+  ctx.fillStyle = '#1d2b33';
+  ctx.fillRect(w / 2 - 7, 12, 14, bh);
+  const fillH = bh * throttle;
+  const grad = ctx.createLinearGradient(0, y0, 0, 12);
+  grad.addColorStop(0, '#ff5a2a');
+  grad.addColorStop(1, '#ffd27a');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = '#ff9a3c';
+  ctx.shadowBlur = 8;
+  ctx.fillRect(w / 2 - 7, y0 - fillH, 14, fillH);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#e8eef2';
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.round(throttle * 100)}%`, w / 2, h / 2 + 4);
+}
+
+// ---- ring marker (cockpit view only) ----
+// Screen-space overlay on the full-screen #markers canvas: the target
+// ring's number inside the ring, a golden light beam from the ring down
+// to the water, and a glowing ellipse where the beam meets the sea —
+// the same "find the ring at a glance" cue as a charted approach.
+// The 3D ring itself is a plain torus, so the numeral and beam live here.
+function drawRingMarker(canvas, game, world, missions) {
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const w = window.innerWidth, h = window.innerHeight;
+  const cw = Math.floor(w * dpr), ch = Math.floor(h * dpr);
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width = cw;
+    canvas.height = ch;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (missions.id !== 'rings' || missions.ringIndex >= world.rings.length) return;
+  const r = world.rings[missions.ringIndex];
+  const vp = mat4Multiply(game.proj, game.view);
+  const project = (x, y, z) => {
+    const p = mat4TransformPoint(vp, x, y, z);
+    if (p[3] <= 0) return null;
+    const nx = p[0] / p[3], ny = p[1] / p[3];
+    if (Math.abs(nx) > 1.05 || Math.abs(ny) > 1.05) return null;
+    return [(nx * 0.5 + 0.5) * w, (0.5 - ny * 0.5) * h];
+  };
+  const c = project(r.x, r.y, r.z);
+  if (!c) return;
+  // Ring screen radius from the projected rim points (ring faces the
+  // approach, so top and side projections both span ~the radius).
+  const top = project(r.x, r.y + 16, r.z);
+  const side = project(r.x + 16, r.y, r.z);
+  let rad = 12;
+  if (top) rad = Math.max(rad, Math.abs(top[1] - c[1]));
+  if (side) rad = Math.max(rad, Math.abs(side[0] - c[0]));
+  // Beam: golden shaft from the ring down to the water below it, fading
+  // out toward the sea (the dashboard covers its foot in the frame).
+  // The water point can fall just below the frame edge when the ring is
+  // close (its projection is then null); clamp the beam's end to just
+  // above the dashboard instead of dropping the beam entirely.
+  const wp = project(r.x, 0, r.z);
+  const beamEnd = Math.min(wp ? wp[1] : Infinity, h - 140);
+  if (beamEnd > c[1]) {
+    const bw = Math.max(6, rad * 0.16);
+    const grad = ctx.createLinearGradient(0, c[1], 0, beamEnd);
+    grad.addColorStop(0, 'rgba(255, 190, 80, 0.85)');
+    grad.addColorStop(1, 'rgba(255, 190, 80, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(c[0] - bw / 2, c[1], bw, beamEnd - c[1]);
     ctx.save();
-    if (lit) {
-      ctx.shadowColor = 'rgba(255, 211, 77, 0.8)';
-      ctx.shadowBlur = 8;
-    }
-    ctx.strokeStyle = '#ffd34d';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(x, cy);
-    ctx.lineTo(x + Math.sin(a) * len, cy - Math.cos(a) * len);
-    ctx.stroke();
-    ctx.fillStyle = '#ffd34d';
-    ctx.beginPath();
-    ctx.arc(x, cy, 4, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.shadowColor = 'rgba(255, 170, 60, 0.9)';
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = 'rgba(255, 190, 80, 0.35)';
+    ctx.fillRect(c[0] - bw / 4, c[1], bw / 2, beamEnd - c[1]);
     ctx.restore();
-  }
-  // Value low inside the dial, drawn after the needle with a dark outline.
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = '#0a1226';
-  ctx.strokeText(valueText, x, cy + 26);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(valueText, x, cy + 26);
-  // Label below the dial, inside the strip.
-  ctx.font = '12px sans-serif';
-  ctx.fillStyle = LABEL_BLUE;
-  ctx.fillText(label, x, cy + r + 14);
-}
-
-function drawHorizonDial(ctx, x, cy, r, game, lit) {
-  const p = game.plane;
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(x, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.translate(x, cy);
-  ctx.rotate(-p.bank);
-  const off = clamp(p.vspeed * 3, -28, 28);
-  ctx.fillStyle = '#7ec3e8';
-  ctx.fillRect(-r, -r, r * 2, r + off);
-  ctx.fillStyle = '#8a5a2e';
-  ctx.fillRect(-r, off, r * 2, r - off + 2);
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(-r, off);
-  ctx.lineTo(r, off);
-  ctx.stroke();
-  ctx.restore();
-  ctx.save();
-  if (lit) {
-    ctx.shadowColor = 'rgba(255, 211, 77, 0.55)';
-    ctx.shadowBlur = 14;
-  }
-  ctx.strokeStyle = lit ? '#ffd34d' : GOLD;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(x, cy, r, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.restore();
-  ctx.font = '12px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = LABEL_BLUE;
-  ctx.fillText('HORIZON', x, cy + r + 14);
-}
-
-function drawThrottleDial(ctx, x, cy, r, game, lit) {
-  const p = game.plane;
-  ctx.save();
-  if (lit) {
-    ctx.shadowColor = 'rgba(255, 211, 77, 0.55)';
-    ctx.shadowBlur = 14;
-  }
-  ctx.fillStyle = '#0a1226';
-  ctx.beginPath();
-  ctx.arc(x, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = lit ? '#ffd34d' : '#3d6f8f';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.restore();
-  // Vertical bar: green fill, red above 85%.
-  const bw = 26;
-  const bh = r * 1.5;
-  const bx = x - bw / 2;
-  const by = cy - bh / 2;
-  ctx.fillStyle = '#12303f';
-  ctx.fillRect(bx, by, bw, bh);
-  const fillH = bh * p.throttle;
-  ctx.fillStyle = p.throttle > 0.85 ? '#e63946' : '#2fbf71';
-  ctx.fillRect(bx, by + bh - fillH, bw, fillH);
-  ctx.strokeStyle = '#3d6f8f';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(bx, by, bw, bh);
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = '#0a1226';
-  ctx.strokeText(`${Math.round(p.throttle * 100)}%`, x, cy + 26);
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText(`${Math.round(p.throttle * 100)}%`, x, cy + 26);
-  ctx.font = '12px sans-serif';
-  ctx.fillStyle = LABEL_BLUE;
-  ctx.fillText('THROTTLE', x, cy + r + 14);
-}
-
-function drawDials(ctx, game, lit) {
-  const p = game.plane;
-  const cy = 642;
-  const r = 50;
-  drawHorizonDial(ctx, 110, cy, r, game, lit);
-  drawDial(ctx, 300, cy, r, 'AIRSPEED', `${Math.round(p.speed)}`, p.speed / 320, true, lit);
-  drawDial(ctx, 470, cy, r, 'ALTITUDE', `${Math.round(p.alt)}m`, p.alt / 200, true, lit);
-  drawDial(ctx, 640, cy, r, 'COMPASS', String(Math.round(headingDeg(game))).padStart(3, '0'), headingDeg(game) / 360, true, lit);
-  drawThrottleDial(ctx, 800, cy, r, game, lit);
-  drawDial(ctx, 950, cy, r, 'FUEL', `${Math.round(p.fuel)}%`, p.fuel / 100, true, lit);
-  const vs = p.vspeed;
-  drawDial(ctx, 1100, cy, r, 'VERT SPD', `${vs >= 0 ? '+' : ''}${vs.toFixed(1)}`, clamp((vs + 10) / 20, 0, 1), true, lit);
-}
-
-function drawTopStrip(ctx, game) {
-  const p = game.plane;
-  const m = game.missions;
-  ctx.fillStyle = '#0a0f28';
-  ctx.fillRect(0, 0, 1280, 62);
-  ctx.fillStyle = GOLD;
-  ctx.fillRect(0, 62, 1280, 2);
-  const cells = [
-    { label: 'ALT', value: `${Math.round(p.alt)} m` },
-    { label: 'SPD', value: `${Math.round(p.speed)} km/h` },
-    { label: 'HDG', value: `${String(Math.round(headingDeg(game))).padStart(3, '0')}°` },
-    { label: 'FUEL', value: `${Math.round(p.fuel)}%`, alert: p.fuel < 20 },
-    { label: 'THR', value: `${Math.round(p.throttle * 100)}%` },
-    { label: 'SCORE', value: `${m.score}` },
-    { label: 'TIME', value: fmtTime(m.timeLeft) },
-  ];
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'alphabetic';
-  cells.forEach((c, i) => {
-    const x = 24 + i * 176;
-    ctx.font = '13px sans-serif';
-    ctx.fillStyle = LABEL_BLUE;
-    ctx.fillText(c.label, x, 20);
-    ctx.font = 'bold 25px sans-serif';
-    ctx.fillStyle = c.alert ? '#ff5a5a' : '#ffffff';
-    ctx.fillText(c.value, x, 50);
-  });
-}
-
-function drawCompassRibbon(ctx, game) {
-  const p = game.plane;
-  const hdg = headingDeg(game);
-  ctx.fillStyle = 'rgba(8, 12, 34, 0.82)';
-  ctx.fillRect(0, 78, 1280, 52);
-  // Centre caret = current heading.
-  ctx.fillStyle = GOLD;
-  ctx.beginPath();
-  ctx.moveTo(640, 80);
-  ctx.lineTo(632, 92);
-  ctx.lineTo(648, 92);
-  ctx.closePath();
-  ctx.fill();
-  const pxPerDeg = 640 / 60;
-  const start = Math.floor((hdg - 60) / 5) * 5;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  for (let d = start; d <= hdg + 60; d += 5) {
-    const rel = normDeg(d - hdg);
-    const x = 640 + rel * pxPerDeg;
-    if (x < 0 || x > 1280) continue;
-    const major = ((d % 15) + 360) % 15 === 0;
-    ctx.strokeStyle = 'rgba(200, 220, 245, 0.8)';
-    ctx.lineWidth = major ? 2 : 1;
-    ctx.beginPath();
-    ctx.moveTo(x, 98);
-    ctx.lineTo(x, 98 + (major ? 16 : 9));
-    ctx.stroke();
-    if (major) {
-      const deg = ((d % 360) + 360) % 360;
-      const name = deg === 0 ? 'N' : deg === 90 ? 'E' : deg === 180 ? 'S' : deg === 270 ? 'W' : String(deg);
-      ctx.font = 'bold 13px sans-serif';
-      ctx.fillStyle = '#dfe9f5';
-      ctx.fillText(name, x, 128);
-    }
-  }
-  // Objective bearing marker (orange triangle) + mission line below.
-  const o = game.missions.getObjective();
-  const def = game.missions.def;
-  if (o) {
-    const bearing = (Math.atan2(o.x - p.x, o.z - p.z) * 180 / Math.PI + 360) % 360;
-    const rel = normDeg(bearing - hdg);
-    const mx = clamp(640 + rel * pxPerDeg, 24, 1256);
-    ctx.fillStyle = '#ff8c42';
-    ctx.beginPath();
-    ctx.moveTo(mx, 82);
-    ctx.lineTo(mx - 8, 96);
-    ctx.lineTo(mx + 8, 96);
-    ctx.closePath();
-    ctx.fill();
-    const dist = Math.round(Math.hypot(o.x - p.x, o.z - p.z));
-    ctx.font = 'bold 20px sans-serif';
-    // Dark outline keeps the line readable when the sun disc sits
-    // behind it (cockpit cover) or a bright island crosses it.
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = 'rgba(10, 8, 30, 0.8)';
-    ctx.strokeText(`${def.name} — ${o.label} · ${dist} m`, 640, 158);
-    ctx.fillStyle = '#ffd34d';
-    ctx.fillText(`${def.name} — ${o.label} · ${dist} m`, 640, 158);
-  } else if (def) {
-    ctx.font = 'bold 20px sans-serif';
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = 'rgba(10, 8, 30, 0.8)';
-    ctx.strokeText(def.name, 640, 158);
-    ctx.fillStyle = '#ffd34d';
-    ctx.fillText(def.name, 640, 158);
-  }
-}
-
-function drawMinimap(ctx, game, time) {
-  const cx = 1196;
-  const cy = 300;
-  const r = 72;
-  ctx.fillStyle = '#0a2e42';
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = GOLD;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  const mx = (x) => cx + (x / 3000) * 70;
-  const mz = (z) => cy + ((z - 1700) / 2500) * 70;
-  for (const isl of game.world.islands) {
-    ctx.fillStyle = '#4d9a58';
-    ctx.beginPath();
-    ctx.arc(mx(isl.x), mz(isl.z), clamp(isl.r * 0.024, 2, 10), 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.fillStyle = '#ffd34d';
-  for (const d of game.world.hopDocks) ctx.fillRect(mx(d.x) - 3, mz(d.z) - 3, 6, 6);
-  for (const v of game.world.mailVillages) ctx.fillRect(mx(v.x) - 2, mz(v.z) - 2, 4, 4);
-  ctx.fillStyle = '#e63946';
-  ctx.beginPath();
-  ctx.arc(mx(game.world.raft.x), mz(game.world.raft.z), 4, 0, Math.PI * 2);
-  ctx.fill();
-  const o = game.missions.getObjective();
-  if (o) {
-    const pulse = 8 + 2.5 * Math.sin(time * 4);
-    ctx.strokeStyle = '#ffd34d';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(mx(o.x), mz(o.z), pulse, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  // White plane arrow, rotated by heading.
-  ctx.save();
-  ctx.translate(mx(game.plane.x), mz(game.plane.z));
-  ctx.rotate(Math.PI - game.plane.heading);
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath();
-  ctx.moveTo(0, -9);
-  ctx.lineTo(6, 7);
-  ctx.lineTo(0, 3);
-  ctx.lineTo(-6, 7);
-  ctx.closePath();
-  ctx.fill();
-  ctx.restore();
-  ctx.restore();
-  ctx.font = '12px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = LABEL_BLUE;
-  ctx.fillText('MAP', cx, cy + r + 16);
-}
-
-function drawViewPill(ctx, game) {
-  const r = VIEW_PILL;
-  ctx.fillStyle = 'rgba(10, 20, 40, 0.88)';
-  ctx.beginPath();
-  ctx.roundRect(r.x, r.y, r.w, r.h, 18);
-  ctx.fill();
-  ctx.strokeStyle = GOLD;
-  ctx.lineWidth = 2;
-  ctx.stroke();
-  ctx.font = 'bold 14px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = '#ffd34d';
-  ctx.fillText(game.view === 'cockpit' ? 'VIEW: COCKPIT [C]' : 'VIEW: CHASE [C]', r.x + r.w / 2, r.y + r.h / 2 + 1);
-}
-
-function drawToast(ctx, game) {
-  if (!game.missions.toast || game.missions.toastLeft <= 0) return;
-  ctx.font = 'bold 17px sans-serif';
-  const w = ctx.measureText(game.missions.toast).width + 36;
-  const x = 640 - w / 2;
-  ctx.fillStyle = 'rgba(10, 20, 40, 0.9)';
-  ctx.beginPath();
-  ctx.roundRect(x, 178, w, 36, 18);
-  ctx.fill();
-  ctx.strokeStyle = GOLD;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  ctx.fillStyle = '#ffffff';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(game.missions.toast, 640, 197);
-}
-
-function drawWarnings(ctx, game) {
-  const p = game.plane;
-  let msg = '';
-  if (!p.landed && p.speed < 55) msg = 'STALL — THROTTLE UP!';
-  else if (p.fuel < 20 && !p.landed) msg = 'LOW FUEL';
-  if (!msg) return;
-  ctx.font = 'bold 22px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.lineWidth = 5;
-  ctx.strokeStyle = '#0a0f28';
-  ctx.strokeText(msg, 640, 540);
-  ctx.fillStyle = '#ff5a5a';
-  ctx.fillText(msg, 640, 540);
-}
-
-export function drawFlightHUD(ctx, game, time) {
-  drawTopStrip(ctx, game);
-  // The compass ribbon is hidden on the complete / game-over screens, so
-  // the result panel (y66) never covers it — the round-2 nit.
-  if (game.state === 'flying' || game.state === 'staging' || game.state === 'paused') {
-    drawCompassRibbon(ctx, game);
-  }
-  drawMinimap(ctx, game, time);
-  drawViewPill(ctx, game);
-  drawToast(ctx, game);
-  drawWarnings(ctx, game);
-  // Bottom panel: the chase instrument strip, and the cockpit dashboard
-  // in cockpit view — the same lit dials either way. In cockpit mode the
-  // panel gets a padded glareshield with stitching and panel screws, so
-  // it reads as a real cockpit dashboard, and the dials glow.
-  ctx.fillStyle = PANEL;
-  ctx.fillRect(0, 592, 1280, 128);
-  ctx.fillStyle = GOLD;
-  ctx.fillRect(0, 592, 1280, 2);
-  if (game.view === 'cockpit') {
-    ctx.fillStyle = '#1a2138';
-    ctx.fillRect(0, 594, 1280, 18);
-    ctx.fillStyle = 'rgba(201, 162, 77, 0.8)';
-    for (let x = 24; x < 1280; x += 42) {
+    // Glowing ellipse where the beam meets the water, when it lands
+    // above the dashboard.
+    if (wp && wp[1] < h - 150) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 190, 80, 0.85)';
+      ctx.lineWidth = 3;
+      ctx.shadowColor = 'rgba(255, 170, 60, 0.9)';
+      ctx.shadowBlur = 12;
       ctx.beginPath();
-      ctx.arc(x, 603, 1.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.fillStyle = '#c9a24d';
-    for (const [sx, sy] of [[18, 620], [1262, 620], [18, 700], [1262, 700]]) {
-      ctx.beginPath();
-      ctx.arc(sx, sy, 3.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#0a0f28';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(sx - 2, sy);
-      ctx.lineTo(sx + 2, sy);
+      ctx.ellipse(wp[0], wp[1], rad * 0.9, rad * 0.32, 0, 0, Math.PI * 2);
       ctx.stroke();
+      ctx.restore();
     }
   }
-  drawDials(ctx, game, game.view === 'cockpit');
-}
-
-function wrapText(ctx, text, maxW) {
-  const words = text.split(' ');
-  const lines = [];
-  let line = '';
-  for (const w of words) {
-    const test = line ? `${line} ${w}` : w;
-    if (ctx.measureText(test).width > maxW && line) {
-      lines.push(line);
-      line = w;
-    } else {
-      line = test;
-    }
-  }
-  if (line) lines.push(line);
-  return lines;
-}
-
-export function drawTitle(ctx, game) {
-  ctx.fillStyle = 'rgba(10, 8, 30, 0.72)';
-  ctx.fillRect(0, 0, 1280, 720);
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 72px sans-serif';
-  ctx.fillStyle = '#ffd34d';
-  ctx.fillText('SENJA AMPHIBI', 640, 150);
-  ctx.font = '24px sans-serif';
-  ctx.fillStyle = '#dfe9f5';
-  ctx.fillText('Seaplane over the Golden Archipelago', 640, 196);
-  ctx.font = '17px sans-serif';
-  ctx.fillStyle = '#b9cbe0';
-  ctx.fillText('W/S throttle  ·  A/D turn  ·  Hold mouse to climb  ·  Space drop crate  ·  C cockpit view  ·  P pause  ·  R restart  ·  M mute', 640, 240);
-  // Four mission cards in a row.
-  const cardW = 272;
-  const cardH = 150;
-  const gap = 16;
-  const totalW = cardW * 4 + gap * 3;
-  const x0 = (1280 - totalW) / 2;
-  const y = 300;
-  game.uiCards = [];
-  const defs = ['rings', 'hop', 'mail', 'rescue'];
-  defs.forEach((id, i) => {
-    const d = game.missionDefs[id];
-    const cx = x0 + i * (cardW + gap);
-    game.uiCards.push({ id, x: cx, y, w: cardW, h: cardH });
-    ctx.fillStyle = 'rgba(14, 20, 48, 0.95)';
-    ctx.beginPath();
-    ctx.roundRect(cx, y, cardW, cardH, 10);
-    ctx.fill();
-    ctx.strokeStyle = GOLD;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.font = 'bold 13px sans-serif';
-    ctx.fillStyle = LABEL_BLUE;
-    ctx.textAlign = 'left';
-    ctx.fillText(`PRESS ${d.key}`, cx + 16, y + 28);
-    ctx.font = 'bold 22px sans-serif';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(d.name, cx + 16, y + 58);
-    ctx.font = '14px sans-serif';
-    ctx.fillStyle = '#dfe9f5';
-    const lines = wrapText(ctx, d.goal, cardW - 32);
-    lines.slice(0, 2).forEach((ln, li) => ctx.fillText(ln, cx + 16, y + 84 + li * 18));
-    ctx.font = 'bold 14px sans-serif';
-    ctx.fillStyle = '#ffd34d';
-    ctx.fillText(d.reward, cx + 16, y + cardH - 16);
-  });
-  ctx.font = '16px sans-serif';
-  ctx.fillStyle = '#b9cbe0';
-  ctx.textAlign = 'center';
-  ctx.fillText('180 seconds a sortie  ·  Fuel burns with throttle  ·  Land gentle: under 85 km/h, sinking slower than 5.5 m/s', 640, 500);
-  ctx.fillText('Click a mission card or press 1–4  ·  Enter starts Ring Run', 640, 528);
-}
-
-function resultPanel(ctx, game, title, titleColor, lines) {
-  ctx.fillStyle = 'rgba(6, 10, 24, 0.45)';
-  ctx.fillRect(0, 0, 1280, 720);
-  const w = 620;
-  const x = (1280 - w) / 2;
-  const y = 66;
-  const h = 190;
-  ctx.fillStyle = 'rgba(14, 20, 48, 0.96)';
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 12);
-  ctx.fill();
-  ctx.strokeStyle = titleColor;
-  ctx.lineWidth = 3;
-  ctx.stroke();
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold 40px sans-serif';
-  ctx.fillStyle = titleColor;
-  ctx.fillText(title, 640, y + 52);
-  ctx.font = '20px sans-serif';
-  ctx.fillStyle = '#ffffff';
-  lines.forEach((ln, i) => ctx.fillText(ln, 640, y + 94 + i * 32));
-  ctx.font = '16px sans-serif';
-  ctx.fillStyle = '#cfe0ff';
-  ctx.fillText('Press R to fly again  ·  1–4 for another mission  ·  click a mission on the title screen', 640, y + h + 30);
-}
-
-export function drawComplete(ctx, game) {
-  const m = game.missions;
-  const p = game.plane;
-  resultPanel(ctx, game, 'MISSION COMPLETE', '#2fbf71', [
-    `${m.def.name} — finished with ${fmtTime(m.timeLeft)} to spare`,
-    `Score: ${m.score} pts (includes +50 completion bonus)`,
-    `Fuel left: ${Math.round(p.fuel)}%  ·  Damage: ${Math.round(p.damage)}%`,
-  ]);
-}
-
-export function drawGameOver(ctx, game) {
-  const m = game.missions;
-  resultPanel(ctx, game, 'MISSION FAILED', '#e63946', [
-    m.failReason || 'Sortie over',
-    `Score: ${m.score} pts`,
-    'Tip: land gentle — under 85 km/h, sinking slower than 5.5 m/s',
-  ]);
-}
-
-export function drawPaused(ctx) {
-  ctx.fillStyle = 'rgba(6, 10, 24, 0.55)';
-  ctx.fillRect(0, 0, 1280, 720);
+  // Numeral inside the ring, warm white with a dark outline so it reads
+  // over sky and sea alike.
+  const num = String(missions.ringIndex + 1);
+  ctx.save();
+  ctx.font = `900 ${Math.round(rad * 0.95)}px system-ui, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.font = 'bold 48px sans-serif';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillText('PAUSED', 640, 330);
-  ctx.font = '20px sans-serif';
-  ctx.fillStyle = '#cfe0ff';
-  ctx.fillText('Press P to resume', 640, 380);
+  ctx.shadowColor = 'rgba(120, 40, 0, 0.9)';
+  ctx.shadowBlur = 10;
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = 'rgba(120, 40, 0, 0.85)';
+  ctx.strokeText(num, c[0], c[1] + 1);
+  ctx.fillStyle = '#fff3cf';
+  ctx.fillText(num, c[0], c[1] + 1);
+  ctx.restore();
+}
+
+// ---- main HUD update (called every animation frame) ----
+export function updateHud(hud, game, plane, missions, world, viewMode) {
+  const st = game.state;
+  const inFlight = st === 'flying' || st === 'paused';
+  hud.root.style.display = inFlight ? 'block' : 'none';
+  if (!inFlight) return;
+
+  hud.stats.alt.textContent = `${Math.round(plane.alt)} m`;
+  hud.stats.spd.textContent = `${Math.round(plane.speed)} km/h`;
+  hud.stats.hdg.textContent = `${Math.round(headingDeg(plane.heading))}°`;
+  hud.stats.fuel.textContent = `${Math.round(plane.fuel)}%`;
+  hud.stats.thr.textContent = `${Math.round(plane.throttle * 100)}%`;
+  hud.stats.score.textContent = String(missions.score);
+  hud.stats.time.textContent = fmtTime(missions.timeLeft);
+  hud.stats.fuel.parentElement.classList.toggle('warn', plane.fuel < 25);
+  hud.stats.time.parentElement.classList.toggle('warn', missions.timeLeft < 30);
+
+  const obj = getObjectiveSafe(missions);
+  if (obj) {
+    const dist = Math.round(Math.hypot(plane.x - obj.x, plane.z - obj.z));
+    hud.objective.textContent = `${obj.label} · ${dist} m`;
+    hud.objective.style.display = 'block';
+  } else {
+    hud.objective.style.display = 'none';
+  }
+
+  // Cockpit view gets the full-width ribbon (like the round-3 cover);
+  // chase view keeps the original 480 px strip so its screenshots do
+  // not change. Swapping the canvas width clears it, but drawCompass
+  // redraws it in the same frame.
+  const wide = viewMode === 'cockpit';
+  if (wide && hud.compass.width !== 1240) {
+    hud.compass.width = 1240;
+    hud.compass.classList.add('wide');
+  } else if (!wide && hud.compass.width !== 480) {
+    hud.compass.width = 480;
+    hud.compass.classList.remove('wide');
+  }
+  const bearing = obj ? Math.atan2(obj.x - plane.x, obj.z - plane.z) : null;
+  drawCompass(hud.compass, plane.heading, bearing);
+  drawMinimap(hud.minimap, world, plane, obj, missions);
+
+  // Toast banner.
+  if (missions.toastTimer > 0 && missions.toast) {
+    hud.toast.textContent = missions.toast;
+    hud.toast.style.opacity = '1';
+  } else {
+    hud.toast.style.opacity = '0';
+  }
+
+  // Cockpit overlay only in cockpit view.
+  const cockpit = viewMode === 'cockpit';
+  hud.cockpit.style.display = cockpit ? 'block' : 'none';
+  if (cockpit) {
+    drawHorizon(hud.gauges.horizon, plane.bank, plane.pitch);
+    drawDial(hud.gauges.airspeed, 'SPD', plane.speed, 0, 320, 80, '');
+    drawDial(hud.gauges.altimeter, 'ALT', plane.alt, 0, 300, 100, '');
+    drawCompassGauge(hud.gauges.compass, plane.heading);
+    drawThrottleGauge(hud.gauges.throttle, plane.throttle);
+    drawDial(hud.gauges.fuel, 'FUEL', plane.fuel, 0, 100, 25, '');
+    drawDial(hud.gauges.vspeed, 'V/S', plane.vspeed, -10, 10, 5, '');
+    drawRingMarker(hud.markers, game, world, missions);
+  }
+}
+
+// getObjective lives in missions.js; avoid a circular import by reading the
+// same fields here (kept in sync with missions.getObjective).
+function getObjectiveSafe(missions) {
+  const w = missions.world;
+  if (missions.complete || missions.failed || !missions.id) return null;
+  if (missions.id === 'rings') {
+    const r = w.rings[missions.ringIndex];
+    return r ? { x: r.x, y: r.y, z: r.z, label: `Ring ${missions.ringIndex + 1}/6` } : null;
+  }
+  if (missions.id === 'hop') {
+    const d = w.hopDocks[missions.dockIndex];
+    return d ? { x: d.x, y: 0, z: d.z, label: `${d.label} — land on the water` } : null;
+  }
+  if (missions.id === 'mail') {
+    const d = w.mailDocks[missions.dropIndex];
+    return d ? { x: d.x, y: 0, z: d.z, label: `${d.label} — drop the crate` } : null;
+  }
+  if (!missions.rescued) {
+    return { x: w.raft.x, y: 0, z: w.raft.z, label: 'Raft — land and pick up the sailor' };
+  }
+  return { x: w.mainDock.x, y: 0, z: w.mainDock.z, label: 'Main Dock — deliver the sailor' };
+}
+
+export function showScreen(hud, name) {
+  for (const [key, el] of Object.entries(hud.screens)) {
+    el.style.display = key === name ? 'flex' : 'none';
+  }
+}
+
+export function showComplete(hud, title, score, timeLeft) {
+  hud.completeTitle.textContent = title;
+  hud.completeScore.textContent = `Score ${score} · ${fmtTime(timeLeft)} left on the clock`;
+  showScreen(hud, 'complete');
+}
+
+export function showGameOver(hud, reason, score) {
+  hud.gameoverReason.textContent = reason;
+  hud.gameoverScore.textContent = `Score ${score}`;
+  showScreen(hud, 'gameover');
 }

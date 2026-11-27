@@ -1,99 +1,128 @@
-// Senja Amphibi — keyboard, mouse and touch input.
-// Keys tracked by e.code; Space is edge-triggered; mouse hold = climb.
-// The view pill rect is hit-tested BEFORE the climb hold engages, so a
-// tap on the pill toggles the view and never makes the plane climb.
+// input.js — keyboard, mouse and touch input for Senja Amphibi.
+// W/S or Up/Down throttle, A/D or Left/Right turn, mouse hold to climb,
+// Space drops a crate, P pause, R restart, C view, M mute, 1-4 missions,
+// Enter starts. Touch: on-screen CLIMB / turn buttons.
 
-export class Input {
-  constructor(canvas) {
-    this.canvas = canvas;
-    this.keys = new Set();
-    this.justPressed = new Set();
-    this.mouseHeld = false;
-    this.clicks = [];
-    this.pillRect = null;
+export function createInput(doc, canvas) {
+  const input = {
+    keys: new Set(),
+    mouseHeld: false,
+    touchClimb: false,
+    touchTurn: 0, // -1 left, +1 right
+    // Edge-triggered actions, consumed once per frame by main.js.
+    dropQueued: false,
+    pauseQueued: false,
+    restartQueued: false,
+    viewQueued: false,
+    muteQueued: false,
+    missionQueued: null, // 'rings' | 'hop' | 'mail' | 'rescue'
+    startQueued: false,
+  };
 
-    window.addEventListener('keydown', (e) => {
+  const KEY_TO_MISSION = {
+    Digit1: 'rings',
+    Digit2: 'hop',
+    Digit3: 'mail',
+    Digit4: 'rescue',
+  };
+
+  doc.addEventListener('keydown', (e) => {
+    if (e.repeat) {
       if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
-      if (!e.repeat) this.justPressed.add(e.code);
-      this.keys.add(e.code);
-    });
-    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
-    window.addEventListener('blur', () => {
-      this.keys.clear();
-      this.mouseHeld = false;
-    });
-
-    canvas.addEventListener('mousedown', (e) => {
-      const p = this.toCanvas(e.clientX, e.clientY);
-      if (this.inPill(p.x, p.y)) {
-        // Pill tap: queue the click for the toggle and keep the climb
-        // hold disengaged, so the plane never climbs on a view tap.
-        this.clicks.push(p);
-        return;
-      }
-      this.mouseHeld = true;
-    });
-    window.addEventListener('mouseup', () => { this.mouseHeld = false; });
-    canvas.addEventListener('click', (e) => {
-      const p = this.toCanvas(e.clientX, e.clientY);
-      if (this.inPill(p.x, p.y)) return; // already queued on mousedown
-      this.clicks.push(p);
-    });
-    canvas.addEventListener('touchstart', (e) => {
-      e.preventDefault();
-      const t = e.touches[0];
-      const p = this.toCanvas(t.clientX, t.clientY);
-      if (this.inPill(p.x, p.y)) {
-        this.clicks.push(p);
-        return;
-      }
-      this.mouseHeld = true;
-    }, { passive: false });
-    canvas.addEventListener('touchend', (e) => {
-      e.preventDefault();
-      this.mouseHeld = false;
-    }, { passive: false });
-    canvas.addEventListener('touchcancel', () => { this.mouseHeld = false; });
-  }
-
-  setPillRect(rect) {
-    this.pillRect = rect;
-  }
-
-  inPill(x, y) {
-    const r = this.pillRect;
-    return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
-  }
-
-  toCanvas(clientX, clientY) {
-    const rect = this.canvas.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left) * (1280 / rect.width),
-      y: (clientY - rect.top) * (720 / rect.height),
-    };
-  }
-
-  // Edge-triggered: true once per physical press.
-  takePressed(code) {
-    if (this.justPressed.has(code)) {
-      this.justPressed.delete(code);
-      return true;
+      return;
     }
-    return false;
-  }
+    input.keys.add(e.code);
+    if (e.code === 'Space') {
+      input.dropQueued = true;
+      e.preventDefault();
+    }
+    if (e.code === 'KeyP') input.pauseQueued = true;
+    if (e.code === 'KeyR') input.restartQueued = true;
+    if (e.code === 'KeyC') input.viewQueued = true;
+    if (e.code === 'KeyM') input.muteQueued = true;
+    if (e.code === 'Enter') input.startQueued = true;
+    if (KEY_TO_MISSION[e.code]) input.missionQueued = KEY_TO_MISSION[e.code];
+    if (e.code.startsWith('Arrow')) e.preventDefault();
+  });
 
-  takeSpace() {
-    return this.takePressed('Space');
-  }
+  doc.addEventListener('keyup', (e) => {
+    input.keys.delete(e.code);
+  });
 
-  takeClicks() {
-    const out = this.clicks;
-    this.clicks = [];
-    return out;
-  }
+  // If the window loses focus mid-flight (alt-tab, devtools), drop every
+  // held key so the plane never flies on with a stuck throttle or turn.
+  window.addEventListener('blur', () => {
+    input.keys.clear();
+    input.mouseHeld = false;
+    input.touchClimb = false;
+    input.touchTurn = 0;
+  });
 
-  // Call once per frame so a press is not re-read next frame.
-  endFrame() {
-    this.justPressed.clear();
-  }
+  // Mouse hold on the canvas = climb. Also counts as the audio gesture.
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) input.mouseHeld = true;
+  });
+  doc.addEventListener('mouseup', () => {
+    input.mouseHeld = false;
+  });
+  canvas.addEventListener('mouseleave', () => {
+    input.mouseHeld = false;
+  });
+
+  // Touch buttons (wired by id in index.html).
+  const bindHold = (id, on, off) => {
+    const el = doc.getElementById(id);
+    if (!el) return;
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); on(); }, { passive: false });
+    el.addEventListener('touchend', (e) => { e.preventDefault(); off(); }, { passive: false });
+    el.addEventListener('touchcancel', () => off());
+    el.addEventListener('mousedown', (e) => { e.preventDefault(); on(); });
+    el.addEventListener('mouseup', () => off());
+  };
+  bindHold('btn-climb',
+    () => { input.touchClimb = true; },
+    () => { input.touchClimb = false; });
+  bindHold('btn-left',
+    () => { input.touchTurn = -1; },
+    () => { if (input.touchTurn === -1) input.touchTurn = 0; });
+  bindHold('btn-right',
+    () => { input.touchTurn = 1; },
+    () => { if (input.touchTurn === 1) input.touchTurn = 0; });
+
+  return input;
+}
+
+// Read the continuous flight controls for this frame.
+export function readFlight(input) {
+  const keys = input.keys;
+  const throttleUp = keys.has('KeyW') || keys.has('ArrowUp');
+  const throttleDown = keys.has('KeyS') || keys.has('ArrowDown');
+  let turn = 0;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) turn -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) turn += 1;
+  turn += input.touchTurn;
+  turn = Math.max(-1, Math.min(1, turn));
+  const climb = input.mouseHeld || input.touchClimb;
+  return { throttleUp, throttleDown, turn, climb };
+}
+
+// Consume the edge-triggered actions queued since the last frame.
+export function consumeActions(input) {
+  const out = {
+    drop: input.dropQueued,
+    pause: input.pauseQueued,
+    restart: input.restartQueued,
+    view: input.viewQueued,
+    mute: input.muteQueued,
+    mission: input.missionQueued,
+    start: input.startQueued,
+  };
+  input.dropQueued = false;
+  input.pauseQueued = false;
+  input.restartQueued = false;
+  input.viewQueued = false;
+  input.muteQueued = false;
+  input.missionQueued = null;
+  input.startQueued = false;
+  return out;
 }

@@ -2,14 +2,112 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Senja Amphibi — a 2D canvas seaplane game over an Indonesian archipelago at golden hour. Four missions, lit instruments, chase and cockpit views.">
-<title>Senja Amphibi — Seaplane over the Golden Archipelago</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="style.css">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Senja Amphibi — 3D Seaplane over the Golden Archipelago</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23ff9a3c'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./style.css">
 </head>
 <body>
-<canvas id="game" width="1280" height="720" aria-label="Senja Amphibi game canvas"></canvas>
-<script type="module" src="src/main.js"></script>
+<canvas id="game"></canvas>
+
+<!-- Cockpit overlays (DOM/CSS over the WebGL canvas) -->
+<div id="cockpit">
+  <div id="glare"></div>
+  <div id="vignette"></div>
+  <div class="pillar left"></div>
+  <div class="pillar right"></div>
+  <div class="pillar top"></div>
+  <canvas id="markers"></canvas>
+  <div id="gauges">
+    <div class="gauge"><canvas id="gauge-horizon" width="110" height="110"></canvas><span>HORIZON</span></div>
+    <div class="gauge"><canvas id="gauge-airspeed" width="110" height="110"></canvas><span>AIRSPEED</span></div>
+    <div class="gauge"><canvas id="gauge-altimeter" width="110" height="110"></canvas><span>ALTITUDE</span></div>
+    <div class="gauge"><canvas id="gauge-compass" width="110" height="110"></canvas><span>COMPASS</span></div>
+    <div class="gauge"><canvas id="gauge-throttle" width="110" height="110"></canvas><span>THROTTLE</span></div>
+    <div class="gauge"><canvas id="gauge-fuel" width="110" height="110"></canvas><span>FUEL</span></div>
+    <div class="gauge"><canvas id="gauge-vspeed" width="110" height="110"></canvas><span>VERT SPD</span></div>
+  </div>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="top-strip">
+    <div class="stat"><span class="k">ALT</span><span class="v" id="stat-alt">0 m</span></div>
+    <div class="stat"><span class="k">SPD</span><span class="v" id="stat-spd">0 km/h</span></div>
+    <div class="stat"><span class="k">HDG</span><span class="v" id="stat-hdg">0°</span></div>
+    <div class="stat"><span class="k">FUEL</span><span class="v" id="stat-fuel">100%</span></div>
+    <div class="stat"><span class="k">THR</span><span class="v" id="stat-thr">0%</span></div>
+    <div class="stat"><span class="k">SCORE</span><span class="v" id="stat-score">0</span></div>
+    <div class="stat"><span class="k">TIME</span><span class="v" id="stat-time">3:00</span></div>
+  </div>
+  <div id="objective">Fly the rings</div>
+  <canvas id="compass" width="480" height="40"></canvas>
+  <canvas id="minimap" width="160" height="160"></canvas>
+  <div id="toast"></div>
+  <button id="view-pill">VIEW · CHASE</button>
+</div>
+
+<!-- Touch controls -->
+<div id="touch">
+  <button id="btn-left" class="tbtn">◀</button>
+  <button id="btn-climb" class="tbtn climb">▲ CLIMB</button>
+  <button id="btn-right" class="tbtn">▶</button>
+</div>
+
+<!-- Title screen -->
+<div id="screen-title" class="screen">
+  <div class="panel">
+    <h1>SENJA AMPHIBI</h1>
+    <p class="sub">A 3D seaplane over an Indonesian archipelago at golden hour</p>
+    <div class="missions">
+      <button data-mission="rings"><b>1 · Ring Run</b><span>Fly 6 rings in order · +100 each</span></button>
+      <button data-mission="hop"><b>2 · Island Hop</b><span>Water-land at 3 lagoon docks · +150 each</span></button>
+      <button data-mission="mail"><b>3 · Mail Drop</b><span>Drop crates on 3 village docks · +120 each</span></button>
+      <button data-mission="rescue"><b>4 · Rescue Run</b><span>Pick up the sailor, deliver him home · +300</span></button>
+    </div>
+    <p class="controls">W/S throttle · A/D turn · hold mouse to climb · Space drops a crate · C view · P pause · R restart</p>
+    <p class="hint">180 seconds a sortie. Land gently: under 85 km/h, sink under 6 m/s. Watch the fuel.</p>
+  </div>
+</div>
+
+<!-- Pause screen -->
+<div id="screen-pause" class="screen" style="display:none">
+  <div class="panel">
+    <h1>PAUSED</h1>
+    <p class="sub">The lagoon waits.</p>
+    <button id="btn-resume" class="bigbtn">Resume (P)</button>
+    <button id="btn-retry" class="bigbtn">Restart mission (R)</button>
+    <button id="btn-menu" class="bigbtn">Back to menu</button>
+  </div>
+</div>
+
+<!-- Complete screen -->
+<div id="screen-complete" class="screen" style="display:none">
+  <div class="panel">
+    <h1 id="complete-title">Mission complete!</h1>
+    <p class="sub" id="complete-score">Score 0</p>
+    <button id="btn-again" class="bigbtn">Fly again (R)</button>
+    <button id="btn-menu2" class="bigbtn">Back to menu</button>
+  </div>
+</div>
+
+<!-- Game over screen -->
+<div id="screen-gameover" class="screen" style="display:none">
+  <div class="panel">
+    <h1>Sortie over</h1>
+    <p class="sub" id="gameover-reason">Out of fuel</p>
+    <p class="sub" id="gameover-score">Score 0</p>
+    <button id="btn-retry2" class="bigbtn" onclick="document.getElementById('btn-retry').click()">Try again (R)</button>
+  </div>
+</div>
+
+<div id="webgl-error" class="screen" style="display:none">
+  <div class="panel">
+    <h1>WebGL unavailable</h1>
+    <p class="sub">Senja Amphibi needs WebGL. Please open it in a desktop browser with hardware or software WebGL enabled.</p>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
 </body>
 </html>
