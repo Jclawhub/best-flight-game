@@ -1,151 +1,144 @@
-// Senja Amphibi — all sound is synthesised WebAudio. No audio files.
-// Nothing here may throw: every method is wrapped in try/catch.
+// audio.js — WebAudio sounds for Senja Amphibi, written from scratch:
+// engine hum pitched with throttle, ring chime, splash, mail-drop thump and
+// a success jingle. Everything is guarded so a headless browser (or a
+// browser without audio) never throws: no AudioContext, no sound, no crash.
 
-export class SoundBank {
-  constructor() {
-    this.ctx = null;
-    this.master = null;
-    this.engineOsc = null;
-    this.engineSub = null;
-    this.engineGain = null;
-    this.engineFilter = null;
-    this.muted = false;
-    this.lastBeep = 0;
+export function createAudio() {
+  const audio = {
+    ctx: null,
+    master: null,
+    engineOsc: null,
+    engineOsc2: null,
+    engineGain: null,
+    engineFilter: null,
+    muted: false,
+    started: false,
+  };
+  return audio;
+}
+
+// Call from a user gesture (or any time — failures are swallowed).
+export function initAudio(audio) {
+  if (audio.ctx) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    audio.ctx = new AC();
+    audio.master = audio.ctx.createGain();
+    audio.master.gain.value = 0.5;
+    audio.master.connect(audio.ctx.destination);
+    // Engine: two detuned saws through a lowpass, gain tied to throttle.
+    audio.engineOsc = audio.ctx.createOscillator();
+    audio.engineOsc.type = 'sawtooth';
+    audio.engineOsc.frequency.value = 52;
+    audio.engineOsc2 = audio.ctx.createOscillator();
+    audio.engineOsc2.type = 'sawtooth';
+    audio.engineOsc2.frequency.value = 55;
+    audio.engineFilter = audio.ctx.createBiquadFilter();
+    audio.engineFilter.type = 'lowpass';
+    audio.engineFilter.frequency.value = 320;
+    audio.engineGain = audio.ctx.createGain();
+    audio.engineGain.gain.value = 0;
+    audio.engineOsc.connect(audio.engineFilter);
+    audio.engineOsc2.connect(audio.engineFilter);
+    audio.engineFilter.connect(audio.engineGain);
+    audio.engineGain.connect(audio.master);
+    audio.engineOsc.start();
+    audio.engineOsc2.start();
+    audio.started = true;
+  } catch {
+    audio.ctx = null;
   }
+}
 
-  ensure() {
+export function setEngine(audio, throttle, speed, flying) {
+  if (!audio.ctx || !audio.started || audio.muted) return;
+  try {
+    const t = audio.ctx.currentTime;
+    const target = flying ? 0.028 + throttle * 0.05 : 0;
+    audio.engineGain.gain.setTargetAtTime(target, t, 0.1);
+    const freq = 46 + throttle * 42 + speed * 0.06;
+    audio.engineOsc.frequency.setTargetAtTime(freq, t, 0.1);
+    audio.engineOsc2.frequency.setTargetAtTime(freq * 1.02, t, 0.1);
+    audio.engineFilter.frequency.setTargetAtTime(240 + throttle * 700, t, 0.1);
+  } catch {
+    // Audio is cosmetic; never let it break the game loop.
+  }
+}
+
+function tone(audio, freq, dur, type, vol, when = 0) {
+  if (!audio.ctx || audio.muted) return;
+  try {
+    const t = audio.ctx.currentTime + when;
+    const osc = audio.ctx.createOscillator();
+    osc.type = type || 'sine';
+    osc.frequency.value = freq;
+    const gain = audio.ctx.createGain();
+    gain.gain.setValueAtTime(0, t);
+    gain.gain.linearRampToValueAtTime(vol || 0.18, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    osc.connect(gain);
+    gain.connect(audio.master);
+    osc.start(t);
+    osc.stop(t + dur + 0.05);
+  } catch {
+    // ignore
+  }
+}
+
+export function playChime(audio) {
+  tone(audio, 880, 0.18, 'sine', 0.2);
+  tone(audio, 1318, 0.3, 'sine', 0.18, 0.09);
+}
+
+export function playSplash(audio) {
+  if (!audio.ctx || audio.muted) return;
+  try {
+    const dur = 0.5;
+    const len = Math.floor(audio.ctx.sampleRate * dur);
+    const buf = audio.ctx.createBuffer(1, len, audio.ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2);
+    }
+    const src = audio.ctx.createBufferSource();
+    src.buffer = buf;
+    const filter = audio.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 900;
+    const gain = audio.ctx.createGain();
+    gain.gain.value = 0.35;
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(audio.master);
+    src.start();
+  } catch {
+    // ignore
+  }
+}
+
+export function playThump(audio) {
+  tone(audio, 140, 0.2, 'triangle', 0.25);
+  tone(audio, 70, 0.25, 'sine', 0.2, 0.02);
+}
+
+export function playClick(audio) {
+  tone(audio, 660, 0.07, 'triangle', 0.12);
+  tone(audio, 990, 0.09, 'triangle', 0.1, 0.04);
+}
+
+export function playJingle(audio) {
+  const notes = [523, 659, 784, 1046];
+  notes.forEach((n, i) => tone(audio, n, 0.35, 'sine', 0.2, i * 0.13));
+}
+
+export function setMuted(audio, muted) {
+  audio.muted = muted;
+  if (audio.master) {
     try {
-      if (!this.ctx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (!AC) return;
-        this.ctx = new AC();
-        this.master = this.ctx.createGain();
-        this.master.gain.value = this.muted ? 0 : 0.5;
-        this.master.connect(this.ctx.destination);
-        // Engine hum: sawtooth 55 Hz + sine sub 28 Hz through a lowpass.
-        this.engineFilter = this.ctx.createBiquadFilter();
-        this.engineFilter.type = 'lowpass';
-        this.engineFilter.frequency.value = 420;
-        this.engineGain = this.ctx.createGain();
-        this.engineGain.gain.value = 0;
-        this.engineOsc = this.ctx.createOscillator();
-        this.engineOsc.type = 'sawtooth';
-        this.engineOsc.frequency.value = 55;
-        this.engineSub = this.ctx.createOscillator();
-        this.engineSub.type = 'sine';
-        this.engineSub.frequency.value = 28;
-        const subGain = this.ctx.createGain();
-        subGain.gain.value = 0.7;
-        this.engineOsc.connect(this.engineFilter);
-        this.engineSub.connect(subGain);
-        subGain.connect(this.engineFilter);
-        this.engineFilter.connect(this.engineGain);
-        this.engineGain.connect(this.master);
-        this.engineOsc.start();
-        this.engineSub.start();
-      }
-      if (this.ctx.state === 'suspended') void this.ctx.resume();
-    } catch (e) { /* audio must never break the game */ }
-  }
-
-  setMuted(m) {
-    this.muted = m;
-    try {
-      if (this.master && this.ctx) {
-        this.master.gain.setTargetAtTime(m ? 0 : 0.5, this.ctx.currentTime, 0.05);
-      }
-    } catch (e) { /* ignore */ }
-  }
-
-  setEngine(throttle, speed, lowFuel) {
-    try {
-      if (!this.ctx || !this.engineGain) return;
-      const t = this.ctx.currentTime;
-      // Gain follows throttle and speed; the hum stays quiet on the
-      // title screen (throttle 0, speed 0) so the page loads silent.
-      const target = 0.02 + throttle * 0.05 + Math.min(speed, 320) / 320 * 0.03;
-      this.engineGain.gain.setTargetAtTime(target, t, 0.1);
-      this.engineOsc.frequency.setTargetAtTime(55 + throttle * 45 + speed * 0.08, t, 0.1);
-      this.engineSub.frequency.setTargetAtTime(28 + throttle * 14, t, 0.1);
-      if (lowFuel && t - this.lastBeep > 1.2) {
-        this.lastBeep = t;
-        this.beep(880, 0.09, 0.12);
-      }
-    } catch (e) { /* ignore */ }
-  }
-
-  tone(freq, dur, type, vol, slideTo) {
-    try {
-      if (!this.ctx || !this.master) return;
-      const t = this.ctx.currentTime;
-      const osc = this.ctx.createOscillator();
-      const g = this.ctx.createGain();
-      osc.type = type || 'sine';
-      osc.frequency.setValueAtTime(freq, t);
-      if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
-      g.gain.setValueAtTime(vol || 0.2, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-      osc.connect(g);
-      g.connect(this.master);
-      osc.start(t);
-      osc.stop(t + dur + 0.02);
-    } catch (e) { /* ignore */ }
-  }
-
-  beep(freq, dur, vol) {
-    this.tone(freq || 660, dur || 0.12, 'sine', vol || 0.18);
-  }
-
-  click() {
-    this.tone(1200, 0.05, 'square', 0.08);
-  }
-
-  chime() {
-    this.tone(880, 0.18, 'sine', 0.2);
-    try {
-      setTimeout(() => this.tone(1318, 0.25, 'sine', 0.18), 90);
-    } catch (e) { /* ignore */ }
-  }
-
-  swoosh() {
-    try {
-      if (!this.ctx || !this.master) return;
-      const t = this.ctx.currentTime;
-      const len = Math.floor(this.ctx.sampleRate * 0.3);
-      const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      const src = this.ctx.createBufferSource();
-      src.buffer = buf;
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(400, t);
-      filter.frequency.exponentialRampToValueAtTime(2400, t + 0.3);
-      const g = this.ctx.createGain();
-      g.gain.setValueAtTime(0.25, t);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-      src.connect(filter);
-      filter.connect(g);
-      g.connect(this.master);
-      src.start(t);
-    } catch (e) { /* ignore */ }
-  }
-
-  thud() {
-    this.tone(90, 0.25, 'sine', 0.35, 45);
-  }
-
-  splash() {
-    this.swoosh();
-    this.tone(300, 0.2, 'sine', 0.15, 120);
-  }
-
-  fanfare() {
-    const notes = [523, 659, 784, 1047];
-    notes.forEach((f, i) => {
-      try {
-        setTimeout(() => this.tone(f, 0.3, 'triangle', 0.22), i * 130);
-      } catch (e) { /* ignore */ }
-    });
+      audio.master.gain.value = muted ? 0 : 0.5;
+    } catch {
+      // ignore
+    }
   }
 }
