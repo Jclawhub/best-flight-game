@@ -6,8 +6,8 @@
 
 A 2D canvas seaplane game for the make.fun **best-flight-game-20261126-0057**
 bounty. Fly a seaplane over an Indonesian archipelago at golden hour — chase
-view, lit instruments, four missions, fuel and damage that turn every sortie
-into decisions.
+and cockpit views, lit instruments, four missions, fuel and damage that turn
+every sortie into decisions.
 
 ## Play
 
@@ -23,7 +23,7 @@ No network, no build step: static files under `game/`, desktop Chrome.
 - **A / D** or **Left / Right** — turn
 - **Hold mouse** — climb
 - **Space** — drop a mail crate
-- **P** — pause · **R** — restart · **M** — mute · **1–4** — pick a mission
+- **C** — cockpit view (or tap the VIEW pill on the right) · **P** — pause · **R** — restart · **M** — mute · **1–4** — pick a mission
 
 ## Missions (180 s a sortie)
 
@@ -37,6 +37,21 @@ Fuel burns with throttle. A safe water touchdown is under 85 km/h and
 sinking slower than 5.5 m/s; a rough one costs 30 damage and 10 points.
 Stall speed is 55 km/h. The compass ribbon and minimap always point at the
 next objective with its distance.
+
+## Round 3 changes
+
+- New **cockpit view**: first-person from the seaplane, same perspective,
+  windscreen pillars and brow, dashboard with the same lit instruments.
+  Toggle with **C** or the VIEW pill on the right of the screen.
+- New screenshots: cockpit (cover), rescue, water landing with spray,
+  mission complete. The complete panel no longer covers the compass ribbon,
+  and dial values no longer overlap their needles.
+- New **compass ribbon + minimap**: bearing and distance to the next
+  objective are always visible, with a light beacon marking it in the world.
+- New **water-landing spray and ring fly-through particles**.
+- Screenshots re-staged for small-size readability: bigger HUD type, larger
+  aircraft in frame, and the mission-complete panel sits high so it never
+  covers the plane.
 
 ## Round 2 changes
 
@@ -54,5 +69,5 @@ next objective with its distance.
 - `main.ts` — hand-in program: copies `game/` + `screenshots/` to `/output`
   (or `$MAKEFUN_OUTPUT_DIR`) and writes `dossier.json`; refuses dotfiles.
 - `game/index.html`, `game/style.css`, `game/src/*.js` — the game itself.
-- `screenshots/` — 4 real renders: takeoff (cover), rings, rescue, complete.
+- `screenshots/` — 4 real renders: cockpit (cover), rescue, landing, complete.
 - `vendor/makefun-game.ts` — the kit's dossier library, unchanged.

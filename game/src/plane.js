@@ -1,96 +1,137 @@
-// Senja Amphibi — seaplane flight model: throttle, turn, climb, stall,
-// water landings and takeoffs, fuel burn and damage. Arcade-tuned so a
-// steady hand lands clean and a rushed one pays for it.
+// Senja Amphibi — seaplane physics. Heading 0 = +z (north).
+// Speed in km/h, altitude in metres, vspeed in m/s.
 
 export class Seaplane {
   constructor() {
-    this.reset(0, 0, 0);
+    this.x = 0;
+    this.z = 0;
+    this.heading = 0;
+    this.speed = 0;
+    this.alt = 0;
+    this.vspeed = 0;
+    this.throttle = 0;
+    this.fuel = 100;
+    this.damage = 0;
+    this.landed = true;
+    this.bank = 0;
+    this.prop = 0;
   }
 
   reset(x, z, heading) {
-    this.x = x; this.z = z; this.heading = heading;
-    this.speed = 0;      // km/h
-    this.alt = 0;        // metres above the sea
-    this.vspeed = 0;     // m/s, + is climbing
-    this.throttle = 0;   // 0..1
-    this.fuel = 100;     // percent
-    this.damage = 0;     // percent; 100 is a wreck
-    this.landed = true;  // starts floating on the water
-    this.bank = 0;       // visual roll, radians
-    this.prop = 0;       // propeller spin angle
+    this.x = x;
+    this.z = z;
+    this.heading = heading;
+    this.speed = 0;
+    this.alt = 0;
+    this.vspeed = 0;
+    this.throttle = 0;
+    this.fuel = 100;
+    this.damage = 0;
+    this.landed = true;
+    this.bank = 0;
+    this.prop = 0;
   }
 
-  // One physics step. Returns an event string for the mission layer, or null.
-  // Events: 'takeoff' | 'landed-clean' | 'landed-rough' |
-  //         'crashed-sea' | 'crashed-island' | 'fuel-out'
+  // Returns an event string ('takeoff', 'landed-clean', 'landed-rough',
+  // 'crashed-sea', 'crashed-island', 'fuel-out') or null.
   update(dt, input, world) {
-    const up = input.isDown('KeyW') || input.isDown('ArrowUp');
-    const down = input.isDown('KeyS') || input.isDown('ArrowDown');
+    const keys = input.keys;
+    const up = keys.has('KeyW') || keys.has('ArrowUp');
+    const down = keys.has('KeyS') || keys.has('ArrowDown');
+    const left = keys.has('KeyA') || keys.has('ArrowLeft');
+    const right = keys.has('KeyD') || keys.has('ArrowRight');
+    const turn = (right ? 1 : 0) - (left ? 1 : 0);
+
+    // Throttle moves 0.6/s.
     if (up) this.throttle = Math.min(1, this.throttle + 0.6 * dt);
     if (down) this.throttle = Math.max(0, this.throttle - 0.6 * dt);
-    const turn = (input.isDown('KeyD') || input.isDown('ArrowRight') ? 1 : 0)
-      - (input.isDown('KeyA') || input.isDown('ArrowLeft') ? 1 : 0);
-    const stalled = !this.landed && this.speed < 55;
-    const turnRate = this.landed ? 0.3
-      : stalled ? 0.15 : 0.52 * (0.55 + 0.45 * Math.min(this.speed, 240) / 240);
-    this.heading += turn * turnRate * dt;
-    this.bank += (turn * 0.45 - this.bank) * Math.min(1, 3 * dt);
-    this.prop += dt * (20 + this.throttle * 180);
 
-    // Fuel drains with throttle: a full-throttle sortie is a real decision.
-    this.fuel = Math.max(0, this.fuel - dt * (0.05 + this.throttle * 0.11));
-    if (this.fuel <= 0) return 'fuel-out';
+    const stalled = !this.landed && this.speed < 55;
+    let rate;
+    if (this.landed) rate = 0.3;
+    else if (stalled) rate = 0.15;
+    else rate = 0.52 * (0.55 + 0.45 * (Math.min(this.speed, 240) / 240));
+    this.heading += turn * rate * dt;
+
+    // Bank eases toward the turn.
+    const bankTarget = this.landed ? 0 : turn * 0.5;
+    this.bank += (bankTarget - this.bank) * Math.min(1, 3 * dt);
+    this.prop += dt * (4 + this.throttle * 30);
+
+    // Speed chases its throttle target (up 28/s, down 40/s).
+    const targetSpeed = this.landed ? this.throttle * 170 : this.throttle * 320;
+    const accel = targetSpeed > this.speed ? 28 : 40;
+    const diff = targetSpeed - this.speed;
+    const step = Math.max(-accel * dt, Math.min(accel * dt, diff));
+    this.speed += step;
+    // Turning scrubs a little speed.
+    if (turn !== 0) this.speed = Math.max(0, this.speed - 3 * dt);
 
     if (this.landed) {
-      const target = this.throttle * 170;
-      this.speed += Math.max(-60 * dt, Math.min(45 * dt, target - this.speed));
-      const v = this.speed / 3.6;
-      this.x += Math.sin(this.heading) * v * dt;
-      this.z += Math.cos(this.heading) * v * dt;
+      // Water taxi, then lift off. A touch of throttle is needed first so
+      // the plane cannot leap off the water from a standstill.
       if (this.throttle > 0.5 && this.speed > 78) {
-        this.landed = false; this.alt = 1; this.vspeed = 3;
+        this.landed = false;
+        this.alt = 1;
+        this.vspeed = 3;
+        this.move(dt);
+        this.clamp();
         return 'takeoff';
       }
-      return null;
+    } else {
+      // Climb is hold-to-climb; otherwise a gentle sink, harder in a stall.
+      const climb = input.mouseHeld ? (this.speed < 70 ? 4 : 7) : 0;
+      const sink = stalled ? -9 : -3;
+      const targetVs = climb + sink;
+      const dv = targetVs - this.vspeed;
+      this.vspeed += Math.max(-2.2 * dt, Math.min(2.2 * dt, dv));
+      this.alt += this.vspeed * dt;
     }
 
-    // Airborne: speed chases the throttle, climb is the mouse.
-    const target = this.throttle * 320;
-    this.speed += Math.max(-40 * dt, Math.min(28 * dt, target - this.speed));
-    // Turning scrubs a little speed: turn discipline pays, yanking does not.
-    if (turn !== 0) this.speed = Math.max(0, this.speed - 3 * dt);
-    let vsTarget = input.mouseHeld ? 7 : (this.speed < 55 ? -9 : -3.0);
-    // Idle sink is 3 m/s: a steady 0.15 glide slope at landing speed, so a
-    // short final approach can actually reach the water instead of sailing
-    // over the dock forever. Level flight means climbing in short bursts.
-    if (input.mouseHeld && this.speed < 70) vsTarget = 4;
-    this.vspeed += (vsTarget - this.vspeed) * Math.min(1, 2.2 * dt);
-    this.alt += this.vspeed * dt;
-    const v = this.speed / 3.6;
-    this.x += Math.sin(this.heading) * v * dt;
-    this.z += Math.cos(this.heading) * v * dt;
-    this.x = Math.max(-3000, Math.min(3000, this.x));
-    this.z = Math.max(-800, Math.min(4200, this.z));
+    this.move(dt);
+    this.clamp();
 
-    // Flying into an island's flank is a crash at any height below its peak.
-    for (const isl of world.islands) {
-      const d = Math.hypot(this.x - isl.x, this.z - isl.z);
-      if (d < isl.r * 0.85 && this.alt < isl.h) return 'crashed-island';
+    // Fuel burn; empty tanks end the sortie.
+    this.fuel -= (0.05 + this.throttle * 0.11) * dt;
+    if (this.fuel <= 0) {
+      this.fuel = 0;
+      return 'fuel-out';
     }
 
-    if (this.alt <= 0) {
-      this.alt = 0;
-      if (this.speed <= 85 && this.vspeed >= -5.5) {
-        this.landed = true; this.vspeed = 0;
-        return 'landed-clean';
+    if (!this.landed) {
+      // Island strike: inside 85% of the island radius and below its top.
+      for (const isl of world.islands) {
+        const d = Math.hypot(this.x - isl.x, this.z - isl.z);
+        if (d < isl.r * 0.85 && this.alt < isl.h) return 'crashed-island';
       }
-      if (this.speed <= 115 && this.vspeed >= -8.5) {
-        this.landed = true; this.vspeed = 0;
-        this.damage = Math.min(100, this.damage + 30);
-        return 'landed-rough';
+      // Touchdown.
+      if (this.alt <= 0) {
+        this.alt = 0;
+        if (this.speed <= 85 && this.vspeed >= -5.5) {
+          this.landed = true;
+          this.vspeed = 0;
+          return 'landed-clean';
+        }
+        if (this.speed <= 115 && this.vspeed >= -8.5) {
+          this.landed = true;
+          this.vspeed = 0;
+          this.damage = Math.min(100, this.damage + 30);
+          return 'landed-rough';
+        }
+        return 'crashed-sea';
       }
-      return 'crashed-sea';
     }
     return null;
+  }
+
+  move(dt) {
+    const ms = this.speed / 3.6;
+    this.x += Math.sin(this.heading) * ms * dt;
+    this.z += Math.cos(this.heading) * ms * dt;
+  }
+
+  clamp() {
+    this.x = Math.max(-3000, Math.min(3000, this.x));
+    this.z = Math.max(-800, Math.min(4200, this.z));
   }
 }

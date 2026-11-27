@@ -1,35 +1,27 @@
-/* Senja Amphibi — page chrome around the 1280x720 canvas. */
-html, body {
+/* Senja Amphibi — dark golden-hour page around the canvas. */
+html,
+body {
   margin: 0;
   padding: 0;
-  height: 100%;
   background: #160f2e;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-}
-
-body {
+  min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
 }
 
-#wrap {
-  text-align: center;
-}
-
-#game {
+canvas {
   display: block;
   box-sizing: border-box;
-  width: min(100vw, 177.78vh);
-  height: min(100vh, 56.25vw);
-  background: #2b1b4d;
+  /* Keep the 16:9 canvas inside the viewport on any screen; border-box
+     so the 2px border never pushes the page into scrollbars. */
+  max-width: 100vw;
+  max-height: 100vh;
+  width: auto;
+  height: auto;
   border: 2px solid #3d6f8f;
   border-radius: 8px;
-}
-
-#hint {
-  margin: 8px 0 0;
-  color: #8fb8d8;
-  font-size: 14px;
+  background: #0d3d52;
+  touch-action: none;
 }
